@@ -1,0 +1,1183 @@
+<!doctype html>
+<html lang="de">
+
+<head>
+    <meta charset="utf-8">
+
+    <meta
+        name="viewport"
+        content="width=device-width, initial-scale=1"
+    >
+
+    <title>
+        {{ metadata.name or tool }} · MOS Tools
+    </title>
+
+    <link
+        rel="stylesheet"
+        href="{{ url_for('static', filename='style.css') }}"
+    >
+</head>
+
+<body>
+
+<div class="page">
+
+    <header>
+
+        <div>
+
+            <a
+                href="/"
+                class="back-link"
+            >
+                ← MOS Tools
+            </a>
+
+            <h1>
+                {{ metadata.name or tool }}
+            </h1>
+
+            {% if metadata.description %}
+
+                <div class="subtitle">
+                    {{ metadata.description }}
+                </div>
+
+            {% endif %}
+
+        </div>
+
+        <span class="version">
+            WebUI v{{ webui_version }}
+        </span>
+
+    </header>
+
+
+    {% if error %}
+
+        <section class="card error-card">
+
+            <div class="error">
+                {{ error }}
+            </div>
+
+        </section>
+
+    {% else %}
+
+        {% if dependencies %}
+
+            {% set dep_missing = namespace(value=false) %}
+            {% for dependency in dependencies %}
+                {% if dependency.required and not dependency.installed %}
+                    {% set dep_missing.value = true %}
+                {% endif %}
+            {% endfor %}
+
+            <section class="settings-section dependency-section">
+
+                <details
+                    class="dependency-details"
+                    {% if dep_missing.value %}open{% endif %}
+                >
+
+                    <summary class="dependency-summary">
+
+                        <div>
+                            <h2>Dependencies</h2>
+                            <div class="subtitle">
+                                Required system packages for this tool
+                            </div>
+                        </div>
+
+                        <div class="dependency-summary-right">
+
+                            {% if dep_missing.value %}
+                                <span class="dependency-missing">
+                                    Missing
+                                </span>
+                            {% else %}
+                                <span class="dependency-ok">
+                                    OK
+                                </span>
+                            {% endif %}
+
+                            <span class="dependency-chevron">
+                                ›
+                            </span>
+
+                        </div>
+
+                    </summary>
+
+                    <div class="card dependency-card">
+
+                        <div class="dependency-list">
+
+                            {% for dependency in dependencies %}
+
+                                <div class="dependency-row">
+
+                                    <div>
+                                        <div class="dependency-command">
+                                            {{ dependency.command }}
+                                        </div>
+                                        <div class="field-help">
+                                            {% if dependency.package == "__system__" %}
+                                            System dependency
+                                        {% else %}
+                                            Package: {{ dependency.package }}
+                                        {% endif %}
+                                        </div>
+                                    </div>
+
+                                    <div class="dependency-status">
+
+                                        {% if not dependency.required %}
+
+                                            <span class="dependency-neutral">
+                                                ○ Not required
+                                            </span>
+
+                                        {% else %}
+
+                                            <span class="{% if dependency.installed %}dependency-ok{% else %}dependency-missing{% endif %}">
+                                                {% if dependency.installed %}
+                                                    ✓ Installed
+                                                {% else %}
+                                                    ✗ Missing
+                                                {% endif %}
+                                            </span>
+
+                                            {% if dependency.package == "__system__" %}
+                                                <span class="dependency-neutral">
+                                                    System dependency
+                                                </span>
+                                            {% elif dependency.persistent %}
+                                                <span class="dependency-ok">
+                                                    ✓ Persistent
+                                                </span>
+                                            {% elif dependency.installed %}
+                                                <span class="dependency-warning">
+                                                    System only
+                                                </span>
+                                            {% endif %}
+
+                                        {% endif %}
+
+                                    </div>
+
+                                </div>
+
+                            {% endfor %}
+
+                        </div>
+
+                        {% set dep_action = namespace(value=false) %}
+                        {% for dependency in dependencies %}
+                            {% if dependency.required and not dependency.installed and dependency.package != "__system__" %}
+                                {% set dep_action.value = true %}
+                            {% endif %}
+                        {% endfor %}
+
+                        {% if dep_action.value %}
+
+                            <div class="dependency-actions">
+
+                                <div
+                                    id="dependency-message"
+                                    class="save-message"
+                                ></div>
+
+                                <button
+                                    type="button"
+                                    id="dependency-install-button"
+                                    class="save-button"
+                                >
+                                    Install missing
+                                </button>
+
+                            </div>
+
+                        {% endif %}
+
+                    </div>
+
+                </details>
+
+            </section>
+
+        {% endif %}
+
+
+        {% if tool_info and (tool_info.readme or tool_info.panels) %}
+
+            <section class="settings-section">
+
+                <div class="settings-section-header">
+                    <div>
+                        <h2>Information</h2>
+                        <div class="subtitle">
+                            Help and live information for this tool
+                        </div>
+                    </div>
+                </div>
+
+                {% if tool_info.readme %}
+                    <details class="card help-card">
+                        <summary>README / Help</summary>
+                        <div class="help-content">{{ tool_info.readme }}</div>
+                    </details>
+                {% endif %}
+
+                {% if tool_info.panels %}
+                    <div class="tool-info-panels">
+
+                        {% for panel in tool_info.panels %}
+                            <div class="card tool-info-card">
+
+                                <div class="tool-info-header">
+                                    <div>
+                                        <h3>{{ panel.title }}</h3>
+
+                                        {% if panel.description %}
+                                            <div class="field-help">
+                                                {{ panel.description }}
+                                            </div>
+                                        {% endif %}
+                                    </div>
+                                </div>
+
+                                {% if panel.output %}
+                                    <pre class="tool-info-output">{{ panel.output }}</pre>
+                                {% endif %}
+
+                                {% if panel.error %}
+                                    <div class="tool-info-error">
+                                        {{ panel.error }}
+                                    </div>
+                                {% endif %}
+
+                            </div>
+                        {% endfor %}
+
+                    </div>
+                {% endif %}
+
+            </section>
+
+        {% endif %}
+
+
+        <form id="settings-form">
+
+            {% for section_id, section in metadata.config.items() %}
+
+                {% if not section.repeat %}
+
+                    <section class="settings-section">
+
+                        <div class="settings-section-header">
+                            <div>
+                                <h2>{{ section.title or section_id }}</h2>
+
+                                {% if section.description %}
+                                    <div class="subtitle">
+                                        {{ section.description }}
+                                    </div>
+                                {% endif %}
+                            </div>
+                        </div>
+
+                        <div class="card settings-card">
+                            <div class="settings-grid">
+
+                                {% for field in section.fields %}
+
+                                    <div class="setting-row">
+                                        <div class="setting-description">
+                                            <label for="field-{{ field.key }}">
+                                                {{ field.label }}
+                                            </label>
+
+                                            {% if field.description %}
+                                                <div class="field-help">
+                                                    {{ field.description }}
+                                                </div>
+                                            {% endif %}
+                                        </div>
+
+                                        <div class="setting-control">
+
+                                            {% if field.type == "integer" %}
+                                                <input
+                                                    id="field-{{ field.key }}"
+                                                    name="{{ field.key }}"
+                                                    data-config-field="1"
+                                                    data-type="integer"
+                                                    type="number"
+                                                    value="{{ config[field.key] }}"
+                                                    {% if field.min is defined %}min="{{ field.min }}"{% endif %}
+                                                    {% if field.max is defined %}max="{{ field.max }}"{% endif %}
+                                                >
+                                            {% elif field.type == "boolean" %}
+
+                                            <label class="switch">
+                                                <input
+                                                    id="field-{{ field.key }}"
+                                                    name="{{ field.key }}"
+                                                    data-config-field="1"
+                                                    data-type="boolean"
+                                                    type="checkbox"
+                                                    {% if config[field.key] %}checked{% endif %}
+                                                >
+                                                <span class="slider"></span>
+                                            </label>
+
+                                        {% elif field.type == "choice" %}
+                                            <select
+                                                id="field-{{ field.key }}"
+                                                name="{{ field.key }}"
+                                                data-config-field="1"
+                                                data-type="text"
+                                            >
+                                                {% for choice in field.choices %}
+                                                    <option
+                                                        value="{{ choice.value }}"
+                                                        {% if config[field.key] == choice.value %}selected{% endif %}
+                                                    >
+                                                        {{ choice.label }}
+                                                    </option>
+                                                {% endfor %}
+                                            </select>
+                                        {% elif field.type == "text" %}
+                                                <input
+                                                    id="field-{{ field.key }}"
+                                                    name="{{ field.key }}"
+                                                    data-config-field="1"
+                                                    data-type="text"
+                                                    type="text"
+                                                    value="{{ config[field.key] }}"
+                                                >
+                                            {% elif field.type == "arguments" %}
+                                                <input
+                                                    id="field-{{ field.key }}"
+                                                    name="{{ field.key }}"
+                                                    data-config-field="1"
+                                                    data-type="text"
+                                                    type="text"
+                                                    value="{{ config[field.key] }}"
+                                                >
+                                            {% endif %}
+
+                                            {% if field.unit %}
+                                                <span class="unit">{{ field.unit }}</span>
+                                            {% endif %}
+                                        </div>
+                                    </div>
+
+                                {% endfor %}
+
+                            </div>
+                        </div>
+
+                    </section>
+
+                {% else %}
+
+                    {% set repeat_count = config[section.repeat] | int %}
+
+                    {% for repeat_index in range(1, repeat_count + 1) %}
+
+                        <section class="settings-section">
+
+                            <div class="settings-section-header">
+                                <div>
+                                    <h2>
+                                        {{ section.title or section_id }}
+                                        {{ repeat_index }}
+                                    </h2>
+                                </div>
+                            </div>
+
+                            <div class="card settings-card">
+                                <div class="settings-grid">
+
+                                    {% for field in section.fields %}
+
+                                        {% set repeated_key = (section.prefix or 'item') ~ '_' ~ repeat_index ~ '_' ~ field.key %}
+
+                                        <div class="setting-row">
+                                            <div class="setting-description">
+                                                <label for="field-{{ repeated_key }}">
+                                                    {{ field.label }}
+                                                </label>
+
+                                                {% if field.description %}
+                                                    <div class="field-help">
+                                                        {{ field.description }}
+                                                    </div>
+                                                {% endif %}
+                                            </div>
+
+                                            <div class="setting-control">
+
+                                                {% if field.type == "integer" %}
+                                                    <input
+                                                        id="field-{{ repeated_key }}"
+                                                        name="{{ repeated_key }}"
+                                                        data-config-field="1"
+                                                        data-type="integer"
+                                                        type="number"
+                                                        value="{{ config[repeated_key] }}"
+                                                        {% if field.min is defined %}min="{{ field.min }}"{% endif %}
+                                                        {% if field.max is defined %}max="{{ field.max }}"{% endif %}
+                                                    >
+                                                {% else %}
+                                                    <input
+                                                        id="field-{{ repeated_key }}"
+                                                        name="{{ repeated_key }}"
+                                                        data-config-field="1"
+                                                        data-type="text"
+                                                        type="text"
+                                                        value="{{ config[repeated_key] }}"
+                                                    >
+                                                {% endif %}
+
+                                                {% if field.unit %}
+                                                    <span class="unit">{{ field.unit }}</span>
+                                                {% endif %}
+                                            </div>
+                                        </div>
+
+                                    {% endfor %}
+
+                                </div>
+                            </div>
+
+                        </section>
+
+                    {% endfor %}
+
+                {% endif %}
+
+            {% endfor %}
+
+
+            {% if metadata.jobs %}
+
+                <section class="settings-section">
+
+                    <div class="settings-section-header">
+
+                        <div>
+
+                            <h2>
+                                Schedule
+                            </h2>
+
+                            <div class="subtitle">
+                                Automatic execution of tool jobs
+                            </div>
+
+                        </div>
+
+                    </div>
+
+
+                    <div class="schedule-list">
+
+                        {% for job_id, job in metadata.jobs.items() %}
+
+                            {% set schedule = schedules[job_id] %}
+
+                            <div
+                                class="card schedule-card schedule-row"
+                                data-job="{{ job_id }}"
+                                data-mode="{{ schedule.mode }}"
+                                data-interval="{{ schedule.interval }}"
+                                data-time="{{ schedule.time }}"
+                                data-missed="{{ schedule.missed }}"
+                            >
+
+                                <div class="schedule-card-header">
+
+                                    <div>
+
+                                        <h3>
+                                            {{ job.name or job_id }}
+                                        </h3>
+
+                                        {% if job.description %}
+
+                                            <div class="field-help">
+                                                {{ job.description }}
+                                            </div>
+
+                                        {% endif %}
+
+                                    </div>
+
+
+                                    <div class="schedule-enabled">
+
+                                        <label class="switch">
+
+                                            <input
+                                                type="checkbox"
+                                                class="schedule-enable"
+
+                                                {% if schedule.enabled %}
+                                                    checked
+                                                {% endif %}
+                                            >
+
+                                            <span class="slider"></span>
+
+                                        </label>
+
+                                        <span class="schedule-state">
+
+                                            {% if schedule.enabled %}
+                                                Enabled
+                                            {% else %}
+                                                Disabled
+                                            {% endif %}
+
+                                        </span>
+
+                                    </div>
+
+                                </div>
+
+
+                                <div class="schedule-options">
+
+                                    <div class="schedule-field">
+
+                                        <label>
+                                            Schedule type
+                                        </label>
+
+                                        <select class="schedule-mode">
+
+                                            <option value="interval">
+                                                Interval
+                                            </option>
+
+                                            <option value="daily">
+                                                Daily
+                                            </option>
+
+                                            <option value="startup">
+                                                Startup
+                                            </option>
+
+                                        </select>
+
+                                    </div>
+
+
+                                    <div class="interval-options">
+
+                                        <div class="schedule-field">
+
+                                            <label>
+                                                Run every
+                                            </label>
+
+                                            <div class="interval-control">
+
+                                                <input
+                                                    type="number"
+                                                    class="schedule-value"
+                                                    min="1"
+                                                    step="1"
+                                                    value="1"
+                                                >
+
+                                                <select class="schedule-unit">
+
+                                                    <option value="1">
+                                                        Seconds
+                                                    </option>
+
+                                                    <option value="60">
+                                                        Minutes
+                                                    </option>
+
+                                                    <option value="3600">
+                                                        Hours
+                                                    </option>
+
+                                                </select>
+
+                                            </div>
+
+                                        </div>
+
+                                    </div>
+
+
+                                    <div class="daily-options">
+
+                                        <div class="schedule-field">
+
+                                            <label>
+                                                Run at
+                                            </label>
+
+                                            <input
+                                                type="time"
+                                                class="schedule-time"
+                                                step="60"
+                                            >
+
+                                        </div>
+
+
+                                        <div class="schedule-field">
+
+                                            <label>
+                                                If scheduled run was missed
+                                            </label>
+
+                                            <select class="schedule-missed">
+
+                                                <option value="run">
+                                                    Run after startup
+                                                </option>
+
+                                                <option value="skip">
+                                                    Skip until next schedule
+                                                </option>
+
+                                            </select>
+
+                                        </div>
+
+                                    </div>
+
+                                </div>
+
+                            </div>
+
+                        {% endfor %}
+
+                    </div>
+
+                </section>
+
+            {% endif %}
+
+
+            <div class="settings-footer">
+
+                <div
+                    id="save-message"
+                    class="save-message"
+                ></div>
+
+                <button
+                    type="submit"
+                    id="save-button"
+                    class="save-button"
+                >
+                    Save settings
+                </button>
+
+            </div>
+
+        </form>
+
+    {% endif %}
+
+</div>
+
+
+<script>
+
+const form =
+    document.getElementById("settings-form");
+
+
+function chooseScheduleUnit(seconds) {
+
+    if (
+        seconds >= 3600 &&
+        seconds % 3600 === 0
+    ) {
+        return 3600;
+    }
+
+    if (
+        seconds >= 60 &&
+        seconds % 60 === 0
+    ) {
+        return 60;
+    }
+
+    return 1;
+}
+
+
+function updateScheduleVisibility(row) {
+
+    const mode =
+        row.querySelector(
+            ".schedule-mode"
+        ).value;
+
+    const intervalOptions =
+        row.querySelector(
+            ".interval-options"
+        );
+
+    const dailyOptions =
+        row.querySelector(
+            ".daily-options"
+        );
+
+    intervalOptions.hidden =
+        mode !== "interval";
+
+    dailyOptions.hidden =
+        mode !== "daily";
+}
+
+
+function updateScheduleState(toggle) {
+
+    const row =
+        toggle.closest(
+            ".schedule-row"
+        );
+
+    const state =
+        row.querySelector(
+            ".schedule-state"
+        );
+
+    state.textContent =
+        toggle.checked
+            ? "Enabled"
+            : "Disabled";
+}
+
+
+function initializeSchedules() {
+
+    document
+        .querySelectorAll(".schedule-row")
+        .forEach(row => {
+
+            const mode =
+                row.dataset.mode ||
+                "interval";
+
+            const interval =
+                Number(
+                    row.dataset.interval ||
+                    60
+                );
+
+            const dailyTime =
+                row.dataset.time ||
+                "03:00";
+
+            const missed =
+                row.dataset.missed ||
+                "skip";
+
+
+            const modeSelect =
+                row.querySelector(
+                    ".schedule-mode"
+                );
+
+            modeSelect.value =
+                mode;
+
+
+            const unit =
+                chooseScheduleUnit(
+                    interval
+                );
+
+            row.querySelector(
+                ".schedule-value"
+            ).value =
+                String(
+                    interval / unit
+                );
+
+            row.querySelector(
+                ".schedule-unit"
+            ).value =
+                String(unit);
+
+
+            row.querySelector(
+                ".schedule-time"
+            ).value =
+                dailyTime;
+
+            row.querySelector(
+                ".schedule-missed"
+            ).value =
+                missed;
+
+
+            updateScheduleVisibility(
+                row
+            );
+
+        });
+
+}
+
+
+function collectConfig() {
+
+    const values = {};
+
+    document
+        .querySelectorAll(
+            "[data-config-field='1']"
+        )
+        .forEach(input => {
+
+            if (
+                input.dataset.type ===
+                "integer"
+            ) {
+                values[input.name] =
+                    Number(
+                        input.value
+                    );
+            }
+
+            else if (
+                input.dataset.type ===
+                "boolean"
+            ) {
+                values[input.name] =
+                    input.checked;
+            }
+
+            else {
+                values[input.name] =
+                    input.value;
+            }
+
+        });
+
+    return values;
+}
+
+
+function collectSchedules() {
+
+    const schedules = {};
+
+    document
+        .querySelectorAll(
+            ".schedule-row"
+        )
+        .forEach(row => {
+
+            const job =
+                row.dataset.job;
+
+            const enabled =
+                row.querySelector(
+                    ".schedule-enable"
+                ).checked;
+
+            const mode =
+                row.querySelector(
+                    ".schedule-mode"
+                ).value;
+
+
+            if (mode === "interval") {
+
+                const value =
+                    Number(
+                        row.querySelector(
+                            ".schedule-value"
+                        ).value
+                    );
+
+                const unit =
+                    Number(
+                        row.querySelector(
+                            ".schedule-unit"
+                        ).value
+                    );
+
+                schedules[job] = {
+                    enabled: enabled,
+                    mode: "interval",
+                    interval:
+                        Math.round(
+                            value * unit
+                        )
+                };
+
+            }
+
+            else if (mode === "daily") {
+
+                schedules[job] = {
+                    enabled: enabled,
+                    mode: "daily",
+                    time:
+                        row.querySelector(
+                            ".schedule-time"
+                        ).value,
+                    missed:
+                        row.querySelector(
+                            ".schedule-missed"
+                        ).value
+                };
+
+            }
+
+            else {
+
+                schedules[job] = {
+                    enabled: enabled,
+                    mode: "startup"
+                };
+
+            }
+
+        });
+
+    return schedules;
+}
+
+
+document
+    .querySelectorAll(
+        ".schedule-enable"
+    )
+    .forEach(toggle => {
+
+        toggle.addEventListener(
+            "change",
+            () => {
+                updateScheduleState(
+                    toggle
+                );
+            }
+        );
+
+    });
+
+
+document
+    .querySelectorAll(
+        ".schedule-mode"
+    )
+    .forEach(select => {
+
+        select.addEventListener(
+            "change",
+            () => {
+
+                updateScheduleVisibility(
+                    select.closest(
+                        ".schedule-row"
+                    )
+                );
+
+            }
+        );
+
+    });
+
+
+if (form) {
+
+    initializeSchedules();
+
+
+    form.addEventListener(
+        "submit",
+        async event => {
+
+            event.preventDefault();
+
+
+            const button =
+                document.getElementById(
+                    "save-button"
+                );
+
+            const message =
+                document.getElementById(
+                    "save-message"
+                );
+
+
+            button.disabled = true;
+
+            message.className =
+                "save-message";
+
+            message.textContent =
+                "Saving...";
+
+
+            try {
+
+                const configResponse =
+                    await fetch(
+                        "/api/tools/{{ tool }}/config",
+                        {
+                            method: "POST",
+
+                            headers: {
+                                "Content-Type":
+                                    "application/json"
+                            },
+
+                            body:
+                                JSON.stringify(
+                                    collectConfig()
+                                )
+                        }
+                    );
+
+
+                const configResult =
+                    await configResponse.json();
+
+
+                if (!configResult.success) {
+                    throw new Error(
+                        configResult.error ||
+                        "Unable to save configuration"
+                    );
+                }
+
+
+                const scheduleResponse =
+                    await fetch(
+                        "/api/tools/{{ tool }}/schedule",
+                        {
+                            method: "POST",
+
+                            headers: {
+                                "Content-Type":
+                                    "application/json"
+                            },
+
+                            body:
+                                JSON.stringify(
+                                    collectSchedules()
+                                )
+                        }
+                    );
+
+
+                const scheduleResult =
+                    await scheduleResponse.json();
+
+
+                if (!scheduleResult.success) {
+                    throw new Error(
+                        scheduleResult.error ||
+                        "Unable to save schedule"
+                    );
+                }
+
+
+                message.className =
+                    "save-message save-success";
+
+                message.textContent =
+                    "Settings saved";
+
+            }
+
+            catch (error) {
+
+                message.className =
+                    "save-message save-error";
+
+                message.textContent =
+                    error.message;
+
+            }
+
+            finally {
+
+                button.disabled = false;
+
+            }
+
+        }
+    );
+
+}
+
+
+const dependencyInstallButton =
+    document.getElementById("dependency-install-button");
+
+if (dependencyInstallButton) {
+    dependencyInstallButton.addEventListener(
+        "click",
+        async () => {
+            const message =
+                document.getElementById("dependency-message");
+
+            dependencyInstallButton.disabled = true;
+            message.className = "save-message";
+            message.textContent =
+                "Installing missing packages...";
+
+            try {
+                const response = await fetch(
+                    "/api/tools/{{ tool }}/dependencies/install",
+                    { method: "POST" }
+                );
+
+                const result = await response.json();
+
+                if (!result.success) {
+                    throw new Error(
+                        result.error ||
+                        "Dependency installation failed"
+                    );
+                }
+
+                message.className =
+                    "save-message save-success";
+                message.textContent =
+                    "Missing dependencies installed";
+
+                window.setTimeout(
+                    () => window.location.reload(),
+                    800
+                );
+            }
+            catch (error) {
+                message.className =
+                    "save-message save-error";
+                message.textContent = error.message;
+                dependencyInstallButton.disabled = false;
+            }
+        }
+    );
+}
+
+</script>
+
+</body>
+</html>

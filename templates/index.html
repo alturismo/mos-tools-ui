@@ -1,0 +1,536 @@
+<!doctype html>
+<html lang="de">
+
+<head>
+    <meta charset="utf-8">
+
+    <meta name="viewport"
+          content="width=device-width, initial-scale=1">
+
+    <title>MOS Tools</title>
+
+    <link rel="stylesheet"
+          href="{{ url_for('static', filename='style.css') }}">
+</head>
+
+<body>
+
+<div class="page">
+
+    <header>
+        <div>
+            <h1>MOS Tools</h1>
+
+            <div class="subtitle">
+                Host Script Management
+            </div>
+        </div>
+
+        <span class="version">
+            WebUI v{{ webui_version }}
+        </span>
+    </header>
+
+
+    <!-- HOST AGENT -->
+
+    <section class="card agent-card">
+
+        <div class="card-header">
+
+            <div>
+                <h2>Host Agent</h2>
+
+                {% if dashboard.agent_online %}
+
+                    <div class="status online">
+                        <span class="dot"></span>
+                        Online
+                    </div>
+
+                {% else %}
+
+                    <div class="status offline">
+                        <span class="dot"></span>
+                        Offline
+                    </div>
+
+                {% endif %}
+            </div>
+
+
+            {% if dashboard.agent_online %}
+
+                <div class="agent-version">
+                    Version {{ dashboard.agent_version }}
+                </div>
+
+            {% endif %}
+
+        </div>
+
+
+        {% if dashboard.agent_error %}
+
+            <div class="error">
+                {{ dashboard.agent_error }}
+            </div>
+
+        {% endif %}
+
+        {% if dashboard.agent_online %}
+            <div class="actions">
+                <button id="agent-restart-button" type="button">
+                    ↻ Restart Agent
+                </button>
+                <span id="agent-restart-message"></span>
+            </div>
+        {% endif %}
+
+    </section>
+
+
+    {% if dashboard.agent_online %}
+
+        <!-- TOOLS -->
+
+        <div class="tool-list">
+
+            {% for tool in dashboard.tools %}
+
+                <section class="tool-section">
+
+                    <div class="tool-title">
+
+                        <div>
+                            <h2>{{ tool.name }}</h2>
+
+                            <span class="tool-id">
+                                {{ tool.id }}
+                            </span>
+                        </div>
+
+						<div class="tool-actions">
+
+							<span class="job-count">
+								{{ tool.jobs|length }}
+								{% if tool.jobs|length == 1 %}
+									Job
+								{% else %}
+									Jobs
+								{% endif %}
+							</span>
+
+							<a
+								class="settings-link"
+								href="/tools/{{ tool.id }}/settings"
+							>
+								⚙ Settings
+							</a>
+
+						</div>
+
+                    </div>
+
+
+                    <div class="jobs">
+
+                        {% for job in tool.jobs %}
+
+                            <section
+                                class="card job-card"
+                                id="job-{{ job.tool }}-{{ job.job }}"
+                            >
+
+                                <div class="job-header">
+
+                                    <div>
+
+                                        <h3>
+                                            {{ job.name }}
+                                        </h3>
+
+                                        {% if job.running %}
+
+                                            <div class="status running">
+                                                <span class="dot"></span>
+                                                Running
+                                            </div>
+
+                                        {% else %}
+
+                                            <div class="status idle">
+                                                <span class="dot"></span>
+                                                Idle
+                                            </div>
+
+                                        {% endif %}
+
+                                        {% if job.schedule_summary %}
+                                            <div class="schedule-badge">
+                                                <span class="schedule-icon">⏱</span>
+                                                {{ job.schedule_summary }}
+                                            </div>
+                                        {% endif %}
+
+                                    </div>
+
+
+                                    {% if job.running %}
+
+                                        <div class="running-badge">
+                                            PID {{ job.pid }}
+                                        </div>
+
+                                    {% endif %}
+
+                                </div>
+
+
+                                {% if job.error %}
+
+                                    <div class="error">
+                                        {{ job.error }}
+                                    </div>
+
+                                {% else %}
+
+                                    <div class="info-grid">
+
+                                        <div>
+                                            <span class="label">
+                                                Last run
+                                            </span>
+
+                                            <span class="value">
+                                                {{ job.last_run or "Never" }}
+                                            </span>
+                                        </div>
+
+
+                                        <div>
+                                            <span class="label">
+                                                PID
+                                            </span>
+
+                                            <span class="value">
+                                                {{ job.pid or "—" }}
+                                            </span>
+                                        </div>
+
+
+                                        <div>
+                                            <span class="label">
+                                                Duration
+                                            </span>
+
+                                            <span class="value">
+
+                                                {% if job.duration is not none %}
+                                                    {{ job.duration }} s
+                                                {% else %}
+                                                    —
+                                                {% endif %}
+
+                                            </span>
+                                        </div>
+
+
+                                        <div>
+                                            <span class="label">
+                                                Exit code
+                                            </span>
+
+                                            <span class="value">
+
+                                                {% if job.exit_code is not none %}
+
+                                                    {% if job.exit_code == 0 %}
+                                                        <span class="success">
+                                                            {{ job.exit_code }}
+                                                        </span>
+                                                    {% else %}
+                                                        <span class="failure">
+                                                            {{ job.exit_code }}
+                                                        </span>
+                                                    {% endif %}
+
+                                                {% else %}
+                                                    —
+                                                {% endif %}
+
+                                            </span>
+                                        </div>
+
+                                    </div>
+
+
+                                    <div class="actions">
+
+                                        {% if job.running %}
+                                            <button
+                                                class="stop-button"
+                                                data-tool="{{ job.tool }}"
+                                                data-job="{{ job.job }}"
+                                            >
+                                                ■ Stop
+                                            </button>
+                                        {% else %}
+                                            <button
+                                                class="run-button"
+                                                data-tool="{{ job.tool }}"
+                                                data-job="{{ job.job }}"
+                                            >
+                                                ▶ Run now
+                                            </button>
+                                        {% endif %}
+
+                                    </div>
+
+
+                                    <div class="message"></div>
+
+                                {% endif %}
+
+                            </section>
+
+                        {% endfor %}
+
+                    </div>
+
+                </section>
+
+            {% else %}
+
+                <section class="card empty">
+                    No tools found.
+                </section>
+
+            {% endfor %}
+
+        </div>
+
+    {% endif %}
+
+</div>
+
+
+<script>
+
+async function restartAgent() {
+
+    const button =
+        document.getElementById("agent-restart-button");
+
+    const message =
+        document.getElementById("agent-restart-message");
+
+    if (!button) return;
+
+    button.disabled = true;
+    message.textContent = " Restarting...";
+
+    try {
+        const response = await fetch(
+            "/api/agent/restart",
+            { method: "POST" }
+        );
+
+        const result = await response.json();
+
+        if (!result.success) {
+            throw new Error(
+                result.error || "Unknown error"
+            );
+        }
+
+        message.textContent = " Restart requested";
+
+        setTimeout(
+            () => window.location.reload(),
+            1500
+        );
+    }
+    catch (error) {
+        message.textContent = " " + error.message;
+        button.disabled = false;
+    }
+}
+
+
+async function runJob(tool, job) {
+
+    const id =
+        "job-" + tool + "-" + job;
+
+    const card =
+        document.getElementById(id);
+
+    const button =
+        card.querySelector(".run-button");
+
+    const message =
+        card.querySelector(".message");
+
+
+    button.disabled = true;
+
+    message.textContent =
+        "Starting...";
+
+
+    try {
+
+        const response = await fetch(
+            "/api/tools/" +
+            encodeURIComponent(tool) +
+            "/" +
+            encodeURIComponent(job) +
+            "/run",
+            {
+                method: "POST"
+            }
+        );
+
+
+        const result =
+            await response.json();
+
+
+        if (!result.success) {
+
+            throw new Error(
+                result.error ||
+                "Unknown error"
+            );
+
+        }
+
+
+        message.textContent =
+            "Started · PID " +
+            result.pid;
+
+
+        setTimeout(
+            () => window.location.reload(),
+            400
+        );
+
+    }
+
+    catch (error) {
+
+        message.textContent =
+            error.message;
+
+        button.disabled = false;
+
+    }
+
+}
+
+
+async function stopJob(tool, job) {
+
+    const id =
+        "job-" + tool + "-" + job;
+
+    const card =
+        document.getElementById(id);
+
+    const button =
+        card.querySelector(".stop-button");
+
+    const message =
+        card.querySelector(".message");
+
+    button.disabled = true;
+    message.textContent = "Stopping...";
+
+    try {
+
+        const response = await fetch(
+            "/api/tools/" +
+            encodeURIComponent(tool) +
+            "/" +
+            encodeURIComponent(job) +
+            "/stop",
+            {
+                method: "POST"
+            }
+        );
+
+        const result =
+            await response.json();
+
+        if (!result.success) {
+            throw new Error(
+                result.error ||
+                "Unknown error"
+            );
+        }
+
+        message.textContent =
+            "Stopped · PID " +
+            result.pid;
+
+        setTimeout(
+            () => window.location.reload(),
+            400
+        );
+    }
+
+    catch (error) {
+        message.textContent =
+            error.message;
+
+        button.disabled = false;
+    }
+}
+
+
+const agentRestartButton =
+    document.getElementById("agent-restart-button");
+
+if (agentRestartButton) {
+    agentRestartButton.addEventListener(
+        "click",
+        restartAgent
+    );
+}
+
+
+document
+    .querySelectorAll(".run-button")
+    .forEach(button => {
+
+        button.addEventListener(
+            "click",
+            () => runJob(
+                button.dataset.tool,
+                button.dataset.job
+            )
+        );
+
+    });
+
+
+document
+    .querySelectorAll(".stop-button")
+    .forEach(button => {
+
+        button.addEventListener(
+            "click",
+            () => stopJob(
+                button.dataset.tool,
+                button.dataset.job
+            )
+        );
+
+    });
+
+</script>
+
+</body>
+</html>
