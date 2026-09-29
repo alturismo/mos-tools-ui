@@ -1,9 +1,16 @@
 .git
 .github
 .gitignore
+
 README.md
 LICENSE
-agent/
+
 __pycache__/
 *.pyc
 *.pyo
+
+*.log
+*.tmp
+
+.DS_Store
+Thumbs.db
