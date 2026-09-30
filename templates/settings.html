@@ -430,6 +430,8 @@
                                                         name="{{ repeated_key }}"
                                                         data-config-field="1"
                                                         data-type="integer"
+                                                        data-repeat-count="{{ section.repeat }}"
+                                                        data-repeat-index="{{ repeat_index }}"
                                                         type="number"
                                                         value="{{ config[repeated_key] }}"
                                                         {% if field.min is defined %}min="{{ field.min }}"{% endif %}
@@ -441,6 +443,8 @@
                                                         name="{{ repeated_key }}"
                                                         data-config-field="1"
                                                         data-type="text"
+                                                        data-repeat-count="{{ section.repeat }}"
+                                                        data-repeat-index="{{ repeat_index }}"
                                                         type="text"
                                                         value="{{ config[repeated_key] }}"
                                                     >
@@ -848,6 +852,37 @@ function collectConfig() {
             "[data-config-field='1']"
         )
         .forEach(input => {
+
+            const repeatCountKey =
+                input.dataset.repeatCount;
+
+            const repeatIndex =
+                Number(
+                    input.dataset.repeatIndex ||
+                    0
+                );
+
+            if (repeatCountKey) {
+
+                const repeatCountInput =
+                    document.querySelector(
+                        `[name="${repeatCountKey}"]`
+                    );
+
+                const repeatCount =
+                    repeatCountInput
+                        ? Number(
+                            repeatCountInput.value
+                        )
+                        : 0;
+
+                if (
+                    repeatIndex >
+                    repeatCount
+                ) {
+                    return;
+                }
+            }
 
             if (
                 input.dataset.type ===
