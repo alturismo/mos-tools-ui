@@ -814,6 +814,9 @@ def save_config(tool, values):
 
     tool_dir = get_tool_dir(tool)
 
+    # Build the schema using the submitted values.
+    # This is important for dynamic/repeated sections whose size
+    # depends on values such as mod_count.
     schema = get_config_schema(tool, values)
 
     if not schema:
@@ -824,6 +827,29 @@ def save_config(tool, values):
     # Start from existing/default config so partial updates work.
     config = parse_config(tool)
 
+    # The existing config may have been parsed using the old repeat
+    # count. Remove fields which no longer exist in the new schema.
+    #
+    # Example:
+    #   mod_count: 2 -> 1
+    #   mod_2_* must disappear from the resulting configuration.
+    config = {
+        key: value
+        for key, value in config.items()
+        if key in schema
+    }
+
+    # Add defaults for fields which are new in the resulting schema.
+    #
+    # Example:
+    #   mod_count: 1 -> 2
+    #   mod_2_* receives the defaults from tool.json.
+    for key, field in schema.items():
+
+        if key not in config and "default" in field:
+            config[key] = field["default"]
+
+    # Apply submitted values.
     for key, value in values.items():
 
         if key not in schema:
