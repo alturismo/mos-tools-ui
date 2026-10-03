@@ -1,0 +1,275 @@
+<!doctype html>
+<html lang="de">
+
+<head>
+    <meta charset="utf-8">
+
+    <meta
+        name="viewport"
+        content="width=device-width, initial-scale=1"
+    >
+
+    <title>
+        {{ metadata.name or tool }} · MOS Tools
+    </title>
+
+    <link
+        rel="stylesheet"
+        href="{{ url_for('static', filename='style.css') }}"
+    >
+</head>
+
+<body>
+
+<div class="app-shell" id="app-shell">
+    <aside class="sidebar" id="sidebar">
+        <div class="sidebar-top">
+            <button class="sidebar-toggle" id="sidebar-toggle" type="button" title="Sidebar ein-/ausklappen" aria-label="Sidebar ein-/ausklappen">☰</button>
+            <a class="sidebar-brand" href="/"><span class="sidebar-brand-mark">M</span><span class="sidebar-label">MOS Tools</span></a>
+        </div>
+        <nav class="sidebar-nav">
+            <a class="sidebar-link" href="/"><span class="sidebar-icon">●</span><span class="sidebar-label">Dashboard</span></a>
+            {% if dashboard and dashboard.agent_online %}
+                <div class="sidebar-heading sidebar-label">TOOLS</div>
+                {% for nav_tool in dashboard.tools %}
+                    <a class="sidebar-link{% if nav_tool.id == tool %} active{% endif %}" href="/#tool-{{ nav_tool.id }}">
+                        <span class="sidebar-icon">›</span><span class="sidebar-label">{{ nav_tool.name }}</span>
+                    </a>
+                {% endfor %}
+            {% endif %}
+        </nav>
+        <div class="sidebar-footer sidebar-label">WebUI v{{ webui_version }}</div>
+    </aside>
+    <main class="main-content">
+<div class="page">
+
+    <header>
+
+        <div>
+
+            <a
+                href="/"
+                class="back-link"
+            >
+                ← MOS Tools
+            </a>
+
+            <h1>
+                {{ metadata.name or tool }}
+            </h1>
+
+            {% if metadata.description %}
+
+                <div class="subtitle">
+                    {{ metadata.description }}
+                </div>
+
+            {% endif %}
+
+            <div class="tool-page-nav">
+                <span class="tool-page-link active">
+                    ▤ Logs
+                </span>
+
+                <a
+                    class="tool-page-link"
+                    href="/tools/{{ tool }}/settings"
+                >
+                    ⚙ Settings
+                </a>
+            </div>
+
+        </div>
+
+        <span class="version">
+            WebUI v{{ webui_version }}
+        </span>
+
+    </header>
+
+
+    {% if error %}
+        <section class="card error-card">
+            <div class="error">{{ error }}</div>
+        </section>
+    {% else %}
+        <section class="settings-section">
+            <div class="settings-section-header">
+                <div>
+                    <h2>Logs</h2>
+                    <div class="subtitle">
+                        Read-only job output for this tool
+                    </div>
+                </div>
+            </div>
+
+            <div class="card log-page-card" data-log-viewer data-tool="{{ tool }}">
+                {% if metadata.jobs %}
+                    <div class="log-page-toolbar">
+                        <div class="log-page-field">
+                            <label for="log-job">Job</label>
+                            <select id="log-job">
+                                {% for job_id, job in metadata.jobs.items() %}
+                                    <option value="{{ job_id }}">{{ job.name or job_id }}</option>
+                                {% endfor %}
+                            </select>
+                        </div>
+
+                        <div class="log-page-field">
+                            <label for="log-lines">Lines</label>
+                            <select id="log-lines">
+                                <option value="100">100</option>
+                                <option value="200" selected>200</option>
+                                <option value="500">500</option>
+                                <option value="1000">1000</option>
+                            </select>
+                        </div>
+
+                        <button type="button" id="log-refresh" class="save-button">
+                            Refresh
+                        </button>
+
+                        <label class="log-auto-control">
+                            <input type="checkbox" id="log-auto">
+                            <span>Auto refresh</span>
+                        </label>
+                    </div>
+
+                    <div class="log-page-status" id="log-status">Loading…</div>
+                    <pre class="tool-info-output log-page-output" id="log-output" tabindex="0"></pre>
+                {% else %}
+                    <div class="subtitle">No jobs are defined for this tool.</div>
+                {% endif %}
+            </div>
+        </section>
+    {% endif %}
+
+</div>
+    </main>
+</div>
+
+
+
+<script>
+const appShell = document.getElementById("app-shell");
+const sidebarToggle = document.getElementById("sidebar-toggle");
+
+function setSidebarCollapsed(collapsed) {
+    if (!appShell) return;
+    appShell.classList.toggle("sidebar-collapsed", collapsed);
+    localStorage.setItem(
+        "mos-tools-sidebar-collapsed",
+        collapsed ? "1" : "0"
+    );
+}
+
+if (sidebarToggle && appShell) {
+    const saved = localStorage.getItem("mos-tools-sidebar-collapsed");
+    if (saved === "1") setSidebarCollapsed(true);
+
+    sidebarToggle.addEventListener("click", () => {
+        setSidebarCollapsed(
+            !appShell.classList.contains("sidebar-collapsed")
+        );
+    });
+}
+
+const viewer = document.querySelector("[data-log-viewer]");
+let logTimer = null;
+
+function setLogStatus(text, error = false) {
+    const status = document.getElementById("log-status");
+    if (!status) return;
+    status.textContent = text;
+    status.classList.toggle("error", error);
+}
+
+async function loadLog(preserveScroll = false) {
+    if (!viewer) return;
+
+    const tool = viewer.dataset.tool;
+    const job = document.getElementById("log-job");
+    const lines = document.getElementById("log-lines");
+    const output = document.getElementById("log-output");
+    const refresh = document.getElementById("log-refresh");
+
+    if (!job || !job.value || !output) return;
+
+    const nearBottom =
+        output.scrollHeight - output.scrollTop - output.clientHeight < 40;
+
+    refresh.disabled = true;
+    setLogStatus("Loading…");
+
+    try {
+        const response = await fetch(
+            "/api/tools/" +
+            encodeURIComponent(tool) + "/" +
+            encodeURIComponent(job.value) +
+            "/log?lines=" +
+            encodeURIComponent(lines.value),
+            { cache: "no-store" }
+        );
+
+        const result = await response.json();
+
+        if (!response.ok || !result.success) {
+            throw new Error(result.error || "Unable to load log");
+        }
+
+        output.textContent = (result.lines || []).join("\n");
+
+        const jobLabel =
+            job.options[job.selectedIndex].textContent.trim();
+
+        setLogStatus(
+            `${result.line_count || 0} lines · ${jobLabel}`
+        );
+
+        if (!preserveScroll || nearBottom) {
+            output.scrollTop = output.scrollHeight;
+        }
+    }
+    catch (error) {
+        setLogStatus(error.message, true);
+    }
+    finally {
+        refresh.disabled = false;
+    }
+}
+
+function updateAutoRefresh() {
+    const auto = document.getElementById("log-auto");
+
+    if (logTimer) {
+        clearInterval(logTimer);
+        logTimer = null;
+    }
+
+    if (auto && auto.checked) {
+        logTimer = setInterval(
+            () => loadLog(true),
+            3000
+        );
+    }
+}
+
+if (viewer) {
+    document.getElementById("log-refresh")
+        ?.addEventListener("click", () => loadLog());
+
+    document.getElementById("log-job")
+        ?.addEventListener("change", () => loadLog());
+
+    document.getElementById("log-lines")
+        ?.addEventListener("change", () => loadLog());
+
+    document.getElementById("log-auto")
+        ?.addEventListener("change", updateAutoRefresh);
+
+    loadLog();
+}
+</script>
+
+</body>
+</html>

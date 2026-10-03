@@ -15,6 +15,29 @@
 
 <body>
 
+<div class="app-shell" id="app-shell">
+    <aside class="sidebar" id="sidebar">
+        <div class="sidebar-top">
+            <button class="sidebar-toggle" id="sidebar-toggle" type="button" title="Sidebar ein-/ausklappen" aria-label="Sidebar ein-/ausklappen">☰</button>
+            <a class="sidebar-brand" href="#top"><span class="sidebar-brand-mark">M</span><span class="sidebar-label">MOS Tools</span></a>
+        </div>
+
+        <nav class="sidebar-nav">
+            <a class="sidebar-link active" href="#top"><span class="sidebar-icon">●</span><span class="sidebar-label">Dashboard</span></a>
+            {% if dashboard.agent_online %}
+                <div class="sidebar-heading sidebar-label">TOOLS</div>
+                {% for tool in dashboard.tools %}
+                    <a class="sidebar-link" href="#tool-{{ tool.id }}" data-tool-link="{{ tool.id }}">
+                        <span class="sidebar-icon">›</span><span class="sidebar-label">{{ tool.name }}</span>
+                    </a>
+                {% endfor %}
+            {% endif %}
+        </nav>
+
+        <div class="sidebar-footer sidebar-label">WebUI v{{ webui_version }}</div>
+    </aside>
+
+    <main class="main-content" id="top">
 <div class="page">
 
     <header>
@@ -98,7 +121,7 @@
 
             {% for tool in dashboard.tools %}
 
-                <section class="tool-section">
+                <section class="tool-section" id="tool-{{ tool.id }}">
 
                     <div class="tool-title">
 
@@ -123,7 +146,14 @@
 
 							<a
 								class="settings-link"
-								href="/tools/{{ tool.id }}/settings"
+								href="/tools/{{ tool.id }}/logs"
+                                                    >
+                                                            ▤ Logs
+                                                    </a>
+
+                                                    <a
+                                                            class="settings-link"
+                                                            href="/tools/{{ tool.id }}/settings"
 							>
 								⚙ Settings
 							</a>
@@ -313,9 +343,43 @@
     {% endif %}
 
 </div>
-
+    </main>
+</div>
 
 <script>
+const appShell = document.getElementById("app-shell");
+const sidebarToggle = document.getElementById("sidebar-toggle");
+
+function setSidebarCollapsed(collapsed) {
+    appShell.classList.toggle("sidebar-collapsed", collapsed);
+    localStorage.setItem("mos-tools-sidebar-collapsed", collapsed ? "1" : "0");
+}
+
+if (sidebarToggle && appShell) {
+    const saved = localStorage.getItem("mos-tools-sidebar-collapsed");
+    if (saved === "1") setSidebarCollapsed(true);
+
+    sidebarToggle.addEventListener("click", () => {
+        setSidebarCollapsed(!appShell.classList.contains("sidebar-collapsed"));
+    });
+}
+
+const toolSections = [...document.querySelectorAll(".tool-section[id]")];
+const toolLinks = [...document.querySelectorAll("[data-tool-link]")];
+
+if ("IntersectionObserver" in window && toolSections.length) {
+    const observer = new IntersectionObserver(entries => {
+        const visible = entries
+            .filter(entry => entry.isIntersecting)
+            .sort((a, b) => b.intersectionRatio - a.intersectionRatio)[0];
+        if (!visible) return;
+        const toolId = visible.target.id.replace(/^tool-/, "");
+        toolLinks.forEach(link => link.classList.toggle("active", link.dataset.toolLink === toolId));
+    }, { rootMargin: "-15% 0px -65% 0px", threshold: [0, 0.1, 0.3] });
+    toolSections.forEach(section => observer.observe(section));
+}
+
+
 
 async function restartAgent() {
 

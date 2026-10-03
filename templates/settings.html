@@ -21,6 +21,26 @@
 
 <body>
 
+<div class="app-shell" id="app-shell">
+    <aside class="sidebar" id="sidebar">
+        <div class="sidebar-top">
+            <button class="sidebar-toggle" id="sidebar-toggle" type="button" title="Sidebar ein-/ausklappen" aria-label="Sidebar ein-/ausklappen">☰</button>
+            <a class="sidebar-brand" href="/"><span class="sidebar-brand-mark">M</span><span class="sidebar-label">MOS Tools</span></a>
+        </div>
+        <nav class="sidebar-nav">
+            <a class="sidebar-link" href="/"><span class="sidebar-icon">●</span><span class="sidebar-label">Dashboard</span></a>
+            {% if dashboard and dashboard.agent_online %}
+                <div class="sidebar-heading sidebar-label">TOOLS</div>
+                {% for nav_tool in dashboard.tools %}
+                    <a class="sidebar-link{% if nav_tool.id == tool %} active{% endif %}" href="/#tool-{{ nav_tool.id }}">
+                        <span class="sidebar-icon">›</span><span class="sidebar-label">{{ nav_tool.name }}</span>
+                    </a>
+                {% endfor %}
+            {% endif %}
+        </nav>
+        <div class="sidebar-footer sidebar-label">WebUI v{{ webui_version }}</div>
+    </aside>
+    <main class="main-content">
 <div class="page">
 
     <header>
@@ -45,6 +65,19 @@
                 </div>
 
             {% endif %}
+
+            <div class="tool-page-nav">
+                <a
+                    class="tool-page-link"
+                    href="/tools/{{ tool }}/logs"
+                >
+                    ▤ Logs
+                </a>
+
+                <span class="tool-page-link active">
+                    ⚙ Settings
+                </span>
+            </div>
 
         </div>
 
@@ -699,9 +732,26 @@
     {% endif %}
 
 </div>
+    </main>
+</div>
 
 
 <script>
+const appShell = document.getElementById("app-shell");
+const sidebarToggle = document.getElementById("sidebar-toggle");
+function setSidebarCollapsed(collapsed) {
+    if (!appShell) return;
+    appShell.classList.toggle("sidebar-collapsed", collapsed);
+    localStorage.setItem("mos-tools-sidebar-collapsed", collapsed ? "1" : "0");
+}
+if (sidebarToggle && appShell) {
+    const saved = localStorage.getItem("mos-tools-sidebar-collapsed");
+    if (saved === "1") setSidebarCollapsed(true);
+    sidebarToggle.addEventListener("click", () => {
+        setSidebarCollapsed(!appShell.classList.contains("sidebar-collapsed"));
+    });
+}
+
 
 const form =
     document.getElementById("settings-form");
