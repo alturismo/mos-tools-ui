@@ -9,7 +9,7 @@ import re
 app = Flask(__name__)
 
 
-WEBUI_VERSION = "0.9"
+WEBUI_VERSION = "0.10"
 
 SOCKET_PATH = "/run/mos-tools/agent.sock"
 SCHEDULE_FILE = "/data/schedules.json"
@@ -718,6 +718,46 @@ def index():
 
 
 @app.route(
+    "/tools/<tool>/logs"
+)
+def tool_logs(tool):
+    try:
+        meta_result = agent_request({
+            "action": "get_meta",
+            "tool": tool
+        })
+
+        if not meta_result.get("success"):
+            raise RuntimeError(
+                meta_result.get(
+                    "error",
+                    "Unable to load metadata"
+                )
+            )
+
+        return render_template(
+            "logs.html",
+            tool=tool,
+            metadata=meta_result.get("metadata", {}),
+            dashboard=get_dashboard(),
+            webui_version=WEBUI_VERSION
+        )
+
+    except Exception as exc:
+        return render_template(
+            "logs.html",
+            tool=tool,
+            metadata={
+                "name": display_name(tool),
+                "jobs": {}
+            },
+            dashboard=get_dashboard(),
+            error=str(exc),
+            webui_version=WEBUI_VERSION
+        ), 500
+
+
+@app.route(
     "/tools/<tool>/settings"
 )
 def tool_settings(tool):
@@ -808,6 +848,7 @@ def tool_settings(tool):
             schedules=schedules,
             dependencies=dependencies,
             tool_info=tool_info,
+            dashboard=get_dashboard(),
             webui_version=WEBUI_VERSION
         )
 
@@ -829,6 +870,7 @@ def tool_settings(tool):
                 "panels": []
             },
             error=str(exc),
+            dashboard=get_dashboard(),
             webui_version=WEBUI_VERSION
         ), 500
 
@@ -958,6 +1000,46 @@ def job_status(tool, job):
             "success": False,
             "error": str(exc)
         }), 503
+
+
+# ------------------------------------------------------------
+# API - Job logs
+# ------------------------------------------------------------
+
+@app.route(
+    "/api/tools/<tool>/<job>/log"
+)
+def job_log(tool, job):
+    try:
+        lines = request.args.get(
+            "lines",
+            200,
+            type=int
+        )
+
+        result = agent_request({
+            "action": "get_log",
+            "tool": tool,
+            "job": job,
+            "lines": lines
+        })
+
+        code = (
+            200
+            if result.get("success")
+            else 400
+        )
+
+        return jsonify(
+            result
+        ), code
+
+    except Exception as exc:
+        return jsonify({
+            "success": False,
+            "error": str(exc)
+        }), 503
+
 
 
 # ------------------------------------------------------------
