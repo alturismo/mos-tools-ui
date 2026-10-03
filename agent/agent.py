@@ -125,6 +125,56 @@ def read_status(tool, job):
         return result
 
 
+def get_log(tool, job, lines=200):
+    # Validate tool/job against an actual executable job.
+    get_script(tool, job)
+
+    try:
+        lines = int(lines)
+    except (TypeError, ValueError):
+        lines = 200
+
+    # Keep responses bounded even if a client sends nonsense.
+    lines = max(1, min(lines, 2000))
+
+    path = log_file(tool, job)
+
+    if not path.is_file():
+        return {
+            "tool": tool,
+            "job": job,
+            "lines": [],
+            "line_count": 0,
+            "requested_lines": lines
+        }
+
+    # Logs are expected to be modest, but only retain the requested
+    # tail in memory.
+    from collections import deque
+
+    with open(
+        path,
+        "r",
+        encoding="utf-8",
+        errors="replace"
+    ) as f:
+        tail = list(deque(f, maxlen=lines))
+
+    tail = [
+        line.rstrip("\n")
+        for line in tail
+    ]
+
+    return {
+        "tool": tool,
+        "job": job,
+        "lines": tail,
+        "line_count": len(tail),
+        "requested_lines": lines
+    }
+
+
+
 # ------------------------------------------------------------
 # Tool / Job discovery
 # ------------------------------------------------------------
@@ -413,7 +463,26 @@ def get_job_status(tool, job):
                     "pid": process.pid
                 }
 
-    return read_status(tool, job)
+    status = read_status(tool, job)
+
+    # Persistierter "running"-Status kann nach Agent-Neustart veraltet sein.
+    if status and status.get("running"):
+        pid = status.get("pid")
+
+        try:
+            pid = int(pid)
+        except (TypeError, ValueError):
+            pid = None
+
+        if not pid or not os.path.exists(f"/proc/{pid}"):
+            status["running"] = False
+            status["finished"] = timestamp()
+            status["exit_code"] = None
+            status["duration"] = None
+
+            write_status(tool, job, status)
+
+    return status
 
 # ------------------------------------------------------------
 # Plugin metadata / configuration
@@ -1505,6 +1574,22 @@ def handle_request(request):
         return {
             "success": True,
             "tools": tools
+        }
+
+    if action == "get_log":
+        tool = request.get("tool")
+        job = request.get("job")
+        lines = request.get("lines", 200)
+
+        result = get_log(
+            tool,
+            job,
+            lines
+        )
+
+        return {
+            "success": True,
+            **result
         }
 
     if action == "run":
