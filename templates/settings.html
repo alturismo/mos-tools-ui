@@ -17,6 +17,58 @@
         rel="stylesheet"
         href="{{ url_for('static', filename='style.css') }}"
     >
+
+<style>
+/* MOS Tools v0.11 schedule layout v3
+   Flatten mode-specific wrappers into the schedule grid on desktop. */
+.schedule-options.mode-weekly .weekly-options,
+.schedule-options.mode-monthly .monthly-options,
+.schedule-options.mode-cron .cron-options {
+    display: contents;
+}
+
+.schedule-options.mode-weekly,
+.schedule-options.mode-monthly {
+    grid-template-columns:
+        minmax(220px, 0.9fr)
+        minmax(180px, 0.8fr)
+        minmax(180px, 0.8fr)
+        minmax(300px, 1.4fr);
+    align-items: end;
+}
+
+.schedule-options.mode-cron {
+    grid-template-columns:
+        minmax(0, 0.9fr)
+        minmax(0, 1.45fr)
+        minmax(0, 1.15fr);
+    align-items: end;
+}
+
+/* Keep all controls within their grid cell. */
+.schedule-options .schedule-field,
+.schedule-options .schedule-field input,
+.schedule-options .schedule-field select {
+    min-width: 0;
+    width: 100%;
+    box-sizing: border-box;
+}
+
+@media (max-width: 900px) {
+    .schedule-options.mode-weekly,
+    .schedule-options.mode-monthly,
+    .schedule-options.mode-cron {
+        grid-template-columns: 1fr;
+    }
+
+    .schedule-options.mode-weekly .weekly-options,
+    .schedule-options.mode-monthly .monthly-options,
+    .schedule-options.mode-cron .cron-options {
+        display: contents;
+    }
+}
+</style>
+
 </head>
 
 <body>
@@ -537,6 +589,9 @@
                                 data-interval="{{ schedule.interval }}"
                                 data-time="{{ schedule.time }}"
                                 data-missed="{{ schedule.missed }}"
+                                data-weekday="{{ schedule.weekday }}"
+                                data-day="{{ schedule.day }}"
+                                data-cron="{{ schedule.cron }}"
                             >
 
                                 <div class="schedule-card-header">
@@ -608,6 +663,9 @@
                                                 Daily
                                             </option>
 
+                                            <option value="weekly">Weekly</option>
+                                            <option value="monthly">Monthly</option>
+                                            <option value="cron">Advanced</option>
                                             <option value="startup">
                                                 Startup
                                             </option>
@@ -697,6 +755,30 @@
 
                                     </div>
 
+                                    <div class="weekly-options">
+                                        <div class="schedule-field">
+                                            <label>Day</label>
+                                            <select class="schedule-weekday">
+                                                <option value="0">Monday</option><option value="1">Tuesday</option><option value="2">Wednesday</option><option value="3">Thursday</option><option value="4">Friday</option><option value="5">Saturday</option><option value="6">Sunday</option>
+                                            </select>
+                                        </div>
+                                        <div class="schedule-field"><label>Run at</label><input type="time" class="schedule-weekly-time" step="60"></div>
+                                        <div class="schedule-field"><label>If scheduled run was missed</label><select class="schedule-weekly-missed"><option value="run">Run after startup</option><option value="skip">Skip until next schedule</option></select></div>
+                                    </div>
+
+                                    <div class="monthly-options">
+                                        <div class="schedule-field"><label>Day</label><select class="schedule-month-day">
+                                            {% for day in range(1, 32) %}<option value="{{ day }}">{{ day }}</option>{% endfor %}<option value="last">Last day</option>
+                                        </select></div>
+                                        <div class="schedule-field"><label>Run at</label><input type="time" class="schedule-monthly-time" step="60"></div>
+                                        <div class="schedule-field"><label>If scheduled run was missed</label><select class="schedule-monthly-missed"><option value="run">Run after startup</option><option value="skip">Skip until next schedule</option></select></div>
+                                    </div>
+
+                                    <div class="cron-options">
+                                        <div class="schedule-field"><label>Cron expression (5 fields)</label><input type="text" class="schedule-cron" placeholder="15 23 1 */2 *"></div>
+                                        <div class="schedule-field"><label>If scheduled run was missed</label><select class="schedule-cron-missed"><option value="run">Run after startup</option><option value="skip">Skip until next schedule</option></select></div>
+                                    </div>
+
                                 </div>
 
                             </div>
@@ -784,6 +866,25 @@ function updateScheduleVisibility(row) {
             ".schedule-mode"
         ).value;
 
+    const scheduleOptions =
+        row.querySelector(
+            ".schedule-options"
+        );
+
+    if (scheduleOptions) {
+        scheduleOptions.classList.remove(
+            "mode-interval",
+            "mode-daily",
+            "mode-weekly",
+            "mode-monthly",
+            "mode-cron",
+            "mode-startup"
+        );
+        scheduleOptions.classList.add(
+            "mode-" + mode
+        );
+    }
+
     const intervalOptions =
         row.querySelector(
             ".interval-options"
@@ -799,6 +900,10 @@ function updateScheduleVisibility(row) {
 
     dailyOptions.hidden =
         mode !== "daily";
+
+    row.querySelector(".weekly-options").hidden = mode !== "weekly";
+    row.querySelector(".monthly-options").hidden = mode !== "monthly";
+    row.querySelector(".cron-options").hidden = mode !== "cron";
 }
 
 
@@ -844,6 +949,9 @@ function initializeSchedules() {
             const missed =
                 row.dataset.missed ||
                 "skip";
+            const weekday = row.dataset.weekday || "6";
+            const monthDay = row.dataset.day || "1";
+            const cron = row.dataset.cron || "0 3 * * *";
 
 
             const modeSelect =
@@ -882,6 +990,15 @@ function initializeSchedules() {
                 ".schedule-missed"
             ).value =
                 missed;
+
+            row.querySelector(".schedule-weekday").value = weekday;
+            row.querySelector(".schedule-weekly-time").value = dailyTime;
+            row.querySelector(".schedule-weekly-missed").value = missed;
+            row.querySelector(".schedule-month-day").value = monthDay;
+            row.querySelector(".schedule-monthly-time").value = dailyTime;
+            row.querySelector(".schedule-monthly-missed").value = missed;
+            row.querySelector(".schedule-cron").value = cron;
+            row.querySelector(".schedule-cron-missed").value = missed;
 
 
             updateScheduleVisibility(
@@ -1031,6 +1148,16 @@ function collectSchedules() {
 
             }
 
+            else if (mode === "weekly") {
+                schedules[job] = {enabled, mode: "weekly", weekday: Number(row.querySelector(".schedule-weekday").value), time: row.querySelector(".schedule-weekly-time").value, missed: row.querySelector(".schedule-weekly-missed").value};
+            }
+            else if (mode === "monthly") {
+                const dayValue = row.querySelector(".schedule-month-day").value;
+                schedules[job] = {enabled, mode: "monthly", day: dayValue === "last" ? "last" : Number(dayValue), time: row.querySelector(".schedule-monthly-time").value, missed: row.querySelector(".schedule-monthly-missed").value};
+            }
+            else if (mode === "cron") {
+                schedules[job] = {enabled, mode: "cron", cron: row.querySelector(".schedule-cron").value.trim(), missed: row.querySelector(".schedule-cron-missed").value};
+            }
             else {
 
                 schedules[job] = {
