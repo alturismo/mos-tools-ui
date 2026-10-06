@@ -9,7 +9,7 @@ import re
 app = Flask(__name__)
 
 
-WEBUI_VERSION = "0.10"
+WEBUI_VERSION = "0.11"
 
 SOCKET_PATH = "/run/mos-tools/agent.sock"
 SCHEDULE_FILE = "/data/schedules.json"
@@ -20,6 +20,99 @@ MAX_SCHEDULE_INTERVAL = 31536000
 DAILY_TIME_RE = re.compile(
     r"^(?:[01]\d|2[0-3]):[0-5]\d$"
 )
+
+
+
+CRON_FIELD_RE = re.compile(r"^[0-9*/,-]+$")
+
+
+def validate_cron_field(value, minimum, maximum):
+    if (
+        not isinstance(value, str)
+        or not value
+        or not CRON_FIELD_RE.match(value)
+    ):
+        return False
+
+    def number(token):
+        if not token.isdigit():
+            return None
+
+        value = int(token)
+
+        if minimum <= value <= maximum:
+            return value
+
+        return None
+
+    for item in value.split(","):
+        if not item:
+            return False
+
+        base, separator, step = item.partition("/")
+
+        if separator:
+            if (
+                not step.isdigit()
+                or int(step) < 1
+                or "/" in step
+            ):
+                return False
+
+        if base == "*":
+            continue
+
+        if "-" in base:
+            parts = base.split("-")
+
+            if len(parts) != 2:
+                return False
+
+            start = number(parts[0])
+            end = number(parts[1])
+
+            if (
+                start is None
+                or end is None
+                or start > end
+            ):
+                return False
+
+        elif number(base) is None:
+            return False
+
+    return True
+
+
+def validate_cron_expression(value):
+    if not isinstance(value, str):
+        return False
+
+    fields = value.split()
+
+    if len(fields) != 5:
+        return False
+
+    limits = (
+        (0, 59),
+        (0, 23),
+        (1, 31),
+        (1, 12),
+        (0, 7)
+    )
+
+    return all(
+        validate_cron_field(
+            field,
+            minimum,
+            maximum
+        )
+        for field, (
+            minimum,
+            maximum
+        ) in zip(fields, limits)
+    )
+
 
 
 # ------------------------------------------------------------
@@ -183,7 +276,10 @@ def normalize_schedule(schedule):
     if mode not in (
         "interval",
         "daily",
-        "startup"
+        "startup",
+        "weekly",
+        "monthly",
+        "cron"
     ):
         mode = "interval"
 
@@ -203,9 +299,14 @@ def normalize_schedule(schedule):
         "03:00"
     )
 
-    if not isinstance(
-        daily_time,
-        str
+    if (
+        not isinstance(
+            daily_time,
+            str
+        )
+        or not DAILY_TIME_RE.match(
+            daily_time
+        )
     ):
         daily_time = "03:00"
 
@@ -220,6 +321,45 @@ def normalize_schedule(schedule):
     ):
         missed = "skip"
 
+    try:
+        weekday = int(
+            schedule.get(
+                "weekday",
+                0
+            )
+        )
+
+    except (TypeError, ValueError):
+        weekday = 0
+
+    if not 0 <= weekday <= 6:
+        weekday = 0
+
+    day = schedule.get(
+        "day",
+        1
+    )
+
+    if day != "last":
+        try:
+            day = int(day)
+
+        except (TypeError, ValueError):
+            day = 1
+
+        if not 1 <= day <= 31:
+            day = 1
+
+    cron = schedule.get(
+        "cron",
+        "0 3 * * *"
+    )
+
+    if not validate_cron_expression(
+        cron
+    ):
+        cron = "0 3 * * *"
+
     return {
         "enabled": bool(
             schedule.get(
@@ -230,9 +370,11 @@ def normalize_schedule(schedule):
         "mode": mode,
         "interval": interval,
         "time": daily_time,
-        "missed": missed
+        "missed": missed,
+        "weekday": weekday,
+        "day": day,
+        "cron": cron
     }
-
 
 def get_tool_schedules(
     tool,
@@ -286,6 +428,50 @@ def validate_schedule_payload(
 
     result = {}
 
+    def get_missed(
+        job_id,
+        schedule
+    ):
+        missed = schedule.get(
+            "missed",
+            "skip"
+        )
+
+        if missed not in (
+            "run",
+            "skip"
+        ):
+            raise ValueError(
+                f"{job_id}: invalid "
+                f"missed-run policy"
+            )
+
+        return missed
+
+    def get_time(
+        job_id,
+        schedule
+    ):
+        value = schedule.get(
+            "time"
+        )
+
+        if (
+            not isinstance(
+                value,
+                str
+            )
+            or not DAILY_TIME_RE.match(
+                value
+            )
+        ):
+            raise ValueError(
+                f"{job_id}: time must "
+                f"be HH:MM"
+            )
+
+        return value
+
     for job_id in known_jobs:
         if job_id not in values:
             raise ValueError(
@@ -327,7 +513,10 @@ def validate_schedule_payload(
         if mode not in (
             "interval",
             "daily",
-            "startup"
+            "startup",
+            "weekly",
+            "monthly",
+            "cron"
         ):
             raise ValueError(
                 f"{job_id}: invalid "
@@ -378,44 +567,115 @@ def validate_schedule_payload(
             }
 
         elif mode == "daily":
-            daily_time = schedule.get(
-                "time"
-            )
+            result[job_id] = {
+                "enabled": enabled,
+                "mode": "daily",
+                "time": get_time(
+                    job_id,
+                    schedule
+                ),
+                "missed": get_missed(
+                    job_id,
+                    schedule
+                )
+            }
 
-            if (
-                not isinstance(
-                    daily_time,
-                    str
+        elif mode == "weekly":
+            try:
+                weekday = int(
+                    schedule.get(
+                        "weekday"
+                    )
                 )
-                or
-                not DAILY_TIME_RE.match(
-                    daily_time
-                )
+
+            except (
+                TypeError,
+                ValueError
             ):
                 raise ValueError(
-                    f"{job_id}: time must "
-                    f"be HH:MM"
+                    f"{job_id}: weekday "
+                    f"must be 0..6"
                 )
 
-            missed = schedule.get(
-                "missed",
-                "skip"
-            )
-
-            if missed not in (
-                "run",
-                "skip"
-            ):
+            if not 0 <= weekday <= 6:
                 raise ValueError(
-                    f"{job_id}: invalid "
-                    f"missed-run policy"
+                    f"{job_id}: weekday "
+                    f"must be 0..6"
                 )
 
             result[job_id] = {
                 "enabled": enabled,
-                "mode": "daily",
-                "time": daily_time,
-                "missed": missed
+                "mode": "weekly",
+                "weekday": weekday,
+                "time": get_time(
+                    job_id,
+                    schedule
+                ),
+                "missed": get_missed(
+                    job_id,
+                    schedule
+                )
+            }
+
+        elif mode == "monthly":
+            day = schedule.get(
+                "day"
+            )
+
+            if day != "last":
+                try:
+                    day = int(day)
+
+                except (
+                    TypeError,
+                    ValueError
+                ):
+                    raise ValueError(
+                        f"{job_id}: day must "
+                        f"be 1..31 or last"
+                    )
+
+                if not 1 <= day <= 31:
+                    raise ValueError(
+                        f"{job_id}: day must "
+                        f"be 1..31 or last"
+                    )
+
+            result[job_id] = {
+                "enabled": enabled,
+                "mode": "monthly",
+                "day": day,
+                "time": get_time(
+                    job_id,
+                    schedule
+                ),
+                "missed": get_missed(
+                    job_id,
+                    schedule
+                )
+            }
+
+        elif mode == "cron":
+            cron = schedule.get(
+                "cron"
+            )
+
+            if not validate_cron_expression(
+                cron
+            ):
+                raise ValueError(
+                    f"{job_id}: invalid cron "
+                    f"expression (5 fields)"
+                )
+
+            result[job_id] = {
+                "enabled": enabled,
+                "mode": "cron",
+                "cron": cron,
+                "missed": get_missed(
+                    job_id,
+                    schedule
+                )
             }
 
         else:
@@ -431,7 +691,6 @@ def validate_schedule_payload(
             )
 
     return result
-
 
 def update_tool_schedules(
     tool,
@@ -479,43 +738,132 @@ def config_value_enabled(value):
 
 
 def format_schedule_summary(schedule):
-    if not isinstance(schedule, dict):
+    if not isinstance(
+        schedule,
+        dict
+    ):
         return None
 
-    if not schedule.get("enabled"):
+    if not schedule.get(
+        "enabled"
+    ):
         return None
 
-    if schedule.get("mode") == "daily":
-        daily_time = schedule.get("time", "03:00")
+    mode = schedule.get(
+        "mode"
+    )
+
+    if mode == "daily":
+        daily_time = schedule.get(
+            "time",
+            "03:00"
+        )
+
         return f"Daily · {daily_time}"
 
-    if schedule.get("mode") == "startup":
+    if mode == "weekly":
+        names = (
+            "Mon",
+            "Tue",
+            "Wed",
+            "Thu",
+            "Fri",
+            "Sat",
+            "Sun"
+        )
+
+        try:
+            weekday = int(
+                schedule.get(
+                    "weekday",
+                    0
+                )
+            )
+
+            name = (
+                names[weekday]
+                if 0 <= weekday <= 6
+                else "?"
+            )
+
+        except (
+            TypeError,
+            ValueError
+        ):
+            name = "?"
+
+        return (
+            f"Weekly · {name} · "
+            f"{schedule.get('time', '03:00')}"
+        )
+
+    if mode == "monthly":
+        day = schedule.get(
+            "day",
+            1
+        )
+
+        label = (
+            "Last day"
+            if day == "last"
+            else f"Day {day}"
+        )
+
+        return (
+            f"Monthly · {label} · "
+            f"{schedule.get('time', '03:00')}"
+        )
+
+    if mode == "cron":
+        return (
+            f"Advanced · "
+            f"{schedule.get('cron', '')}"
+        )
+
+    if mode == "startup":
         return "Startup"
 
     try:
-        seconds = int(schedule.get("interval", 60))
-    except (TypeError, ValueError):
+        seconds = int(
+            schedule.get(
+                "interval",
+                60
+            )
+        )
+
+    except (
+        TypeError,
+        ValueError
+    ):
         seconds = 60
 
     if seconds % 86400 == 0:
         value = seconds // 86400
-        unit = "day" if value == 1 else "days"
+
+        unit = (
+            "day"
+            if value == 1
+            else "days"
+        )
+
     elif seconds % 3600 == 0:
         value = seconds // 3600
-        unit = "hour" if value == 1 else "hours"
+
+        unit = (
+            "hour"
+            if value == 1
+            else "hours"
+        )
+
     elif seconds % 60 == 0:
         value = seconds // 60
         unit = "min"
+
     else:
         value = seconds
         unit = "sec"
 
     return f"Every {value} {unit}"
-
-
-# ------------------------------------------------------------
-# Dashboard
-# ------------------------------------------------------------
 
 def get_dashboard():
     dashboard = {

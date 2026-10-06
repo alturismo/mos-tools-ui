@@ -5,10 +5,12 @@ import os
 import socket
 import time
 
-from datetime import datetime
+from datetime import datetime, timedelta
+import calendar
+import re
 
 
-VERSION = "0.7"
+VERSION = "0.8.1"
 
 SOCKET_PATH = "/run/mos-tools/agent.sock"
 
@@ -458,6 +460,157 @@ def check_daily(
 
 
 # ------------------------------------------------------------
+# Calendar schedules (weekly / monthly / cron)
+# ------------------------------------------------------------
+
+def calendar_slot_id(tool, job, scheduled):
+    return f"{tool}:{job}:{scheduled.strftime('%Y-%m-%dT%H:%M')}"
+
+
+def process_calendar_slot(tool, job, schedule, now, state, scheduled, label):
+    if scheduled is None or now < scheduled:
+        return False
+
+    key = f"{tool}:{job}"
+    slot = calendar_slot_id(tool, job, scheduled)
+    job_state = state.get(key, {})
+    if not isinstance(job_state, dict):
+        job_state = {}
+    if job_state.get("last_slot") == slot:
+        return False
+
+    seconds_late = (now - scheduled).total_seconds()
+    missed = schedule.get("missed", "skip")
+    if missed not in ("run", "skip"):
+        missed = "skip"
+
+    if seconds_late >= 60 and missed == "skip":
+        state[key] = {
+            "last_slot": slot,
+            "processed_at": now.isoformat(timespec="seconds"),
+            "result": "missed-skipped"
+        }
+        log(f"{tool}/{job}: missed {label} slot {scheduled.strftime('%Y-%m-%d %H:%M')}, skipped")
+        return True
+
+    success = run_job(tool, job)
+    state[key] = {
+        "last_slot": slot,
+        "processed_at": now.isoformat(timespec="seconds"),
+        "result": "started" if success else "failed"
+    }
+    return True
+
+
+def check_weekly(tool, job, schedule, now, state):
+    try:
+        weekday = int(schedule.get("weekday", 0))
+        if weekday < 0 or weekday > 6:
+            raise ValueError("weekday must be 0..6")
+        hour, minute = parse_daily_time(schedule.get("time", "00:00"))
+    except Exception as exc:
+        log(f"{tool}/{job}: invalid weekly schedule: {exc}")
+        return False
+
+    days_back = (now.weekday() - weekday) % 7
+    date = (now - timedelta(days=days_back)).date()
+    scheduled = now.replace(year=date.year, month=date.month, day=date.day,
+                            hour=hour, minute=minute, second=0, microsecond=0)
+    return process_calendar_slot(tool, job, schedule, now, state, scheduled, "weekly")
+
+
+def check_monthly(tool, job, schedule, now, state):
+    try:
+        hour, minute = parse_daily_time(schedule.get("time", "00:00"))
+        value = schedule.get("day", 1)
+        last_day = calendar.monthrange(now.year, now.month)[1]
+        if str(value) == "last":
+            day = last_day
+        else:
+            day = int(value)
+            if day < 1 or day > 31:
+                raise ValueError("day must be 1..31 or last")
+
+            # A numeric day is literal. If that day does not exist in the
+            # current month, this month has no slot. Use day="last" when
+            # the intended behaviour is the actual last day of every month.
+            if day > last_day:
+                return False
+    except Exception as exc:
+        log(f"{tool}/{job}: invalid monthly schedule: {exc}")
+        return False
+
+    scheduled = now.replace(day=day, hour=hour, minute=minute, second=0, microsecond=0)
+    return process_calendar_slot(tool, job, schedule, now, state, scheduled, "monthly")
+
+
+def _cron_values(field, minimum, maximum):
+    values = set()
+    for part in field.split(','):
+        part = part.strip()
+        if not part:
+            raise ValueError("empty cron field")
+        step = 1
+        base = part
+        if '/' in part:
+            base, step_s = part.split('/', 1)
+            step = int(step_s)
+            if step < 1:
+                raise ValueError("cron step must be >= 1")
+        if base == '*':
+            start, end = minimum, maximum
+        elif '-' in base:
+            a, b = base.split('-', 1)
+            start, end = int(a), int(b)
+        else:
+            start = end = int(base)
+        if start < minimum or end > maximum or start > end:
+            raise ValueError("cron value out of range")
+        values.update(range(start, end + 1, step))
+    return values
+
+
+def cron_matches(expr, dt):
+    fields = expr.split()
+    if len(fields) != 5:
+        raise ValueError("cron must contain 5 fields")
+    minute, hour, dom, month, dow = fields
+    minutes = _cron_values(minute, 0, 59)
+    hours = _cron_values(hour, 0, 23)
+    doms = _cron_values(dom, 1, 31)
+    months = _cron_values(month, 1, 12)
+    dows = _cron_values(dow, 0, 7)
+    cron_dow = (dt.weekday() + 1) % 7
+    dow_match = cron_dow in dows or (cron_dow == 0 and 7 in dows)
+    dom_match = dt.day in doms
+    # Standard cron semantics: when both DOM and DOW are restricted, either may match.
+    day_match = (dom_match and dow_match) if dom == '*' or dow == '*' else (dom_match or dow_match)
+    return dt.minute in minutes and dt.hour in hours and dt.month in months and day_match
+
+
+def check_cron(tool, job, schedule, now, state):
+    expr = str(schedule.get("cron", "")).strip()
+    try:
+        # Validate once here and find the most recent matching minute, max 366 days back.
+        fields = expr.split()
+        if len(fields) != 5:
+            raise ValueError("cron must contain 5 fields")
+        candidate = now.replace(second=0, microsecond=0)
+        scheduled = None
+        for _ in range(366 * 24 * 60 + 1):
+            if cron_matches(expr, candidate):
+                scheduled = candidate
+                break
+            candidate -= timedelta(minutes=1)
+        if scheduled is None:
+            raise ValueError("no matching slot within 366 days")
+    except Exception as exc:
+        log(f"{tool}/{job}: invalid cron schedule '{expr}': {exc}")
+        return False
+    return process_calendar_slot(tool, job, schedule, now, state, scheduled, "cron")
+
+
+# ------------------------------------------------------------
 # Startup schedules
 # ------------------------------------------------------------
 
@@ -532,6 +685,15 @@ def check_job(
             wall_now,
             state
         )
+
+    if mode == "weekly":
+        return check_weekly(tool, job, schedule, wall_now, state)
+
+    if mode == "monthly":
+        return check_monthly(tool, job, schedule, wall_now, state)
+
+    if mode == "cron":
+        return check_cron(tool, job, schedule, wall_now, state)
 
     if mode == "startup":
         return check_startup(
