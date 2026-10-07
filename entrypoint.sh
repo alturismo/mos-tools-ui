@@ -1,22 +1,16 @@
 #!/bin/sh
 set -e
 
-MOS_ROOT="/mos-tools"
-
 AGENT_SOURCE="/opt/mos-tools/agent"
 AGENT_TARGET="/host-agent"
-AGENT_BACKUP="${AGENT_TARGET}/backups"
+BACKUP_ROOT="/mos-tools-backups"
 
 echo "[MOS-TOOLS] Initializing persistent directories..."
 
 mkdir -p \
-    "${MOS_ROOT}/data" \
-    "${MOS_ROOT}/scripts" \
-    "${MOS_ROOT}/logs" \
-    "${MOS_ROOT}/status" \
-    "${MOS_ROOT}/backups" \
-    "${AGENT_TARGET}" \
-    "${AGENT_BACKUP}"
+    /data \
+    "$AGENT_TARGET" \
+    "$BACKUP_ROOT"
 
 # ------------------------------------------------------------
 # Persistent scheduler files
@@ -35,25 +29,14 @@ fi
 # ------------------------------------------------------------
 # Host agent bootstrap / update
 #
-# The agent shipped with the Docker image lives in:
+# Image agent:
 #   /opt/mos-tools/agent
 #
-# The persistent host agent is mounted at:
+# Persistent host agent:
 #   /host-agent
 #
-# Behaviour:
-# - No persistent agent:
-#     Install the image agent.
-#
-# - Different VERSION:
-#     Back up the persistent agent and replace it with the
-#     version shipped with the Docker image.
-#
-# - Same VERSION:
-#     Leave the persistent agent untouched.
-#
-# - Image VERSION cannot be determined:
-#     Leave an existing persistent agent untouched.
+# Persistent backups:
+#   /mos-tools-backups/agent/
 # ------------------------------------------------------------
 
 if [ -d "$AGENT_SOURCE" ]; then
@@ -89,9 +72,10 @@ if [ -d "$AGENT_SOURCE" ]; then
 
         echo "[MOS-TOOLS] Updating host agent: ${target_version:-unknown} -> ${source_version}"
 
-        BACKUP_DIR="${AGENT_BACKUP}/agent-${target_version:-unknown}"
+        mkdir -p "${BACKUP_ROOT}/agent"
 
-        # Do not overwrite an existing backup of the same version.
+        BACKUP_DIR="${BACKUP_ROOT}/agent/agent-${target_version:-unknown}"
+
         if [ -e "$BACKUP_DIR" ]; then
             BACKUP_DIR="${BACKUP_DIR}-$(date +%Y%m%d-%H%M%S)"
         fi
@@ -119,8 +103,7 @@ if [ -d "$AGENT_SOURCE" ]; then
 
     fi
 
-    # Install additional files introduced by the image which do not
-    # yet exist in the persistent agent directory.
+    # Install additional files introduced by the image.
     for source in "$AGENT_SOURCE"/*; do
 
         [ -e "$source" ] || continue
