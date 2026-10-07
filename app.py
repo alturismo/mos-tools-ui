@@ -9,7 +9,7 @@ import re
 app = Flask(__name__)
 
 
-WEBUI_VERSION = "0.11"
+WEBUI_VERSION = "0.13"
 
 SOCKET_PATH = "/run/mos-tools/agent.sock"
 SCHEDULE_FILE = "/data/schedules.json"
@@ -1150,12 +1150,35 @@ def tool_settings(tool):
             {}
         )
 
+        collections = {"jobs": []}
+        if metadata.get("dynamic_jobs", {}).get("collection"):
+            collection_result = agent_request({
+                "action": "get_collections",
+                "tool": tool
+            })
+            if collection_result.get("success"):
+                collections = collection_result.get(
+                    "collections",
+                    collections
+                )
+
         schedules = (
             get_tool_schedules(
                 tool,
                 metadata
             )
         )
+
+        findings = {}
+        if tool == "file-integrity":
+            for job_id in metadata.get("jobs", {}):
+                result = agent_request({
+                    "action": "get_findings",
+                    "tool": tool,
+                    "job": job_id
+                }, timeout=15)
+                if result.get("success"):
+                    findings[job_id] = result.get("data", {})
 
         dependencies = []
 
@@ -1193,6 +1216,8 @@ def tool_settings(tool):
             tool=tool,
             metadata=metadata,
             config=config,
+            collections=collections,
+            findings=findings,
             schedules=schedules,
             dependencies=dependencies,
             tool_info=tool_info,
@@ -1211,6 +1236,8 @@ def tool_settings(tool):
                 "jobs": {}
             },
             config={},
+            collections={"jobs": []},
+            findings={},
             schedules={},
             dependencies=[],
             tool_info={
@@ -1388,6 +1415,74 @@ def job_log(tool, job):
             "error": str(exc)
         }), 503
 
+
+
+# ------------------------------------------------------------
+# API - File Integrity findings
+# ------------------------------------------------------------
+
+@app.route("/api/tools/<tool>/findings/<job>")
+def tool_findings(tool, job):
+    try:
+        result = agent_request({
+            "action": "get_findings",
+            "tool": tool,
+            "job": job
+        }, timeout=15)
+        return jsonify(result), (200 if result.get("success") else 400)
+    except Exception as exc:
+        return jsonify({"success": False, "error": str(exc)}), 503
+
+
+@app.route("/api/tools/<tool>/findings/<job>/accept", methods=["POST"])
+def accept_tool_finding(tool, job):
+    try:
+        payload = request.get_json()
+        if not isinstance(payload, dict) or not payload.get("path"):
+            return jsonify({"success": False, "error": "Missing path"}), 400
+        result = agent_request({
+            "action": "accept_finding",
+            "tool": tool,
+            "job": job,
+            "path": payload["path"]
+        }, timeout=3600)
+        return jsonify(result), (200 if result.get("success") else 400)
+    except Exception as exc:
+        return jsonify({"success": False, "error": str(exc)}), 503
+
+
+# ------------------------------------------------------------
+# API - Dynamic collections
+# ------------------------------------------------------------
+
+@app.route(
+    "/api/tools/<tool>/collections",
+    methods=["POST"]
+)
+def save_tool_collections(tool):
+    try:
+        values = request.get_json()
+        if not isinstance(values, dict):
+            return jsonify({
+                "success": False,
+                "error": "Invalid collections data"
+            }), 400
+
+        result = agent_request({
+            "action": "set_collections",
+            "tool": tool,
+            "collections": values
+        })
+
+        return jsonify(result), (
+            200 if result.get("success") else 400
+        )
+
+    except Exception as exc:
+        return jsonify({
+            "success": False,
+            "error": str(exc)
+        }), 503
 
 
 # ------------------------------------------------------------
