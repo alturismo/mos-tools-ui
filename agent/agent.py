@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 
+import stat
+import errno
 import json
 import os
 import re
@@ -15,7 +17,7 @@ import importlib.util
 import signal
 
 
-VERSION = "1.10.1"
+VERSION = "1.13.3"
 
 SOCKET_PATH = "/run/mos-tools/agent.sock"
 RESTART_HELPER = Path("/mnt/cache/appdata/mos-tools/agent/restart-agent.sh").resolve()
@@ -175,42 +177,500 @@ def get_log(tool, job, lines=200):
 
 
 
+
+# ------------------------------------------------------------
+# Dynamic collections
+# ------------------------------------------------------------
+
+def get_collections_path(tool):
+    return get_tool_dir(safe_name(tool)) / "collections.json"
+
+
+def load_collections(tool):
+    path = get_collections_path(tool)
+    if not path.is_file():
+        return {"jobs": []}
+
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    if not isinstance(data, dict):
+        raise ValueError("collections.json must contain an object")
+
+    jobs = data.get("jobs", [])
+    if not isinstance(jobs, list):
+        raise ValueError("collections.jobs must be an array")
+
+    return {"jobs": jobs}
+
+
+def validate_collections(tool, data):
+    if not isinstance(data, dict):
+        raise ValueError("Collections data must be an object")
+
+    jobs = data.get("jobs", [])
+    if not isinstance(jobs, list):
+        raise ValueError("jobs must be an array")
+    if len(jobs) > 100:
+        raise ValueError("Maximum 100 jobs")
+
+    result = []
+    seen = set()
+
+    for item in jobs:
+        if not isinstance(item, dict):
+            raise ValueError("Each job must be an object")
+
+        job_id = str(item.get("id", "")).strip()
+        name = str(item.get("name", "")).strip()
+        targets = item.get("targets", [])
+
+        if not job_id or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", job_id):
+            raise ValueError(f"Invalid job id: {job_id!r}")
+        if job_id in seen:
+            raise ValueError(f"Duplicate job id: {job_id}")
+        seen.add(job_id)
+
+        if not name or len(name) > 128 or "\n" in name or "\r" in name:
+            raise ValueError(f"{job_id}: invalid job name")
+
+        if not isinstance(targets, list) or not targets:
+            raise ValueError(f"{job_id}: at least one target is required")
+        if len(targets) > 100:
+            raise ValueError(f"{job_id}: maximum 100 targets")
+
+        clean_targets = []
+        target_seen = set()
+        for target in targets:
+            target = str(target).strip()
+            if (
+                not target
+                or len(target) > 1024
+                or "\n" in target
+                or "\r" in target
+                or not target.startswith("/")
+            ):
+                raise ValueError(f"{job_id}: invalid target {target!r}")
+            if target not in target_seen:
+                clean_targets.append(target)
+                target_seen.add(target)
+
+        result.append({
+            "id": job_id,
+            "name": name,
+            "targets": clean_targets
+        })
+
+    return {"jobs": result}
+
+
+def save_collections(tool, data):
+    clean = validate_collections(tool, data)
+    path = get_collections_path(tool)
+    temp = path.with_name(path.name + ".tmp")
+
+    with open(temp, "w", encoding="utf-8") as f:
+        json.dump(clean, f, indent=2)
+        f.write("\n")
+        f.flush()
+        os.fsync(f.fileno())
+
+    os.replace(temp, path)
+    return clean
+
+
+
+# ------------------------------------------------------------
+# File Integrity findings / manual accept
+# ------------------------------------------------------------
+
+def integrity_findings_path(tool, job):
+    tool = safe_name(tool)
+    job = safe_name(job)
+    return get_tool_dir(tool) / "findings" / f"{job}.json"
+
+
+def get_integrity_findings(tool, job):
+    # Validates that the dynamic job still exists.
+    definition = get_job_definition(tool, job)
+    path = integrity_findings_path(tool, job)
+    if not path.is_file():
+        return {
+            "job": job,
+            "name": definition.get("name", job),
+            "updated": None,
+            "findings": []
+        }
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    if not isinstance(data, dict) or not isinstance(data.get("findings", []), list):
+        raise ValueError("Invalid findings file")
+    return data
+
+
+def _path_belongs_to_job(path, targets):
+    candidate = Path(path).resolve(strict=True)
+    for target in targets:
+        root = Path(target).resolve(strict=True)
+        try:
+            candidate.relative_to(root)
+            return candidate
+        except ValueError:
+            pass
+    raise ValueError("Finding path is outside this job's targets")
+
+
+def _stable_signature(path):
+    st = path.stat()
+    return (
+        st.st_dev, st.st_ino, st.st_size,
+        st.st_mtime_ns, st.st_ctime_ns
+    )
+
+
+integrity_accept_lock = threading.Lock()
+
+
+def _accept_integrity_finding_locked(tool, job, path_value):
+    if tool != "file-integrity":
+        raise ValueError("Accept is only available for file-integrity")
+
+    definition = get_job_definition(tool, job)
+    targets = definition.get("targets") or []
+
+    if not isinstance(path_value, str) or not path_value.startswith("/"):
+        raise ValueError("Invalid finding path")
+
+    # Accept is only allowed for an unresolved finding.
+    # Check this BEFORE hashing or touching xattrs.
+    finding_path = path_value
+    queue_before = get_integrity_findings(tool, job)
+
+    if not any(
+        item.get("path") == finding_path
+        for item in queue_before.get("findings", [])
+    ):
+        raise ValueError("Finding is not present in findings queue")
+
+    path = _path_belongs_to_job(path_value, targets)
+    if not path.is_file():
+        raise ValueError("Finding path is not a regular file")
+
+    config = parse_config(tool)
+    nice_value = int(config.get("NICE", 10))
+    ionice_class = int(config.get("IONICE_CLASS", 2))
+    ionice_level = int(config.get("IONICE_LEVEL", 7))
+
+    if not 0 <= nice_value <= 19:
+        raise ValueError("NICE must be between 0 and 19")
+
+    if ionice_class not in (1, 2, 3):
+        raise ValueError("IONICE_CLASS must be 1, 2 or 3")
+
+    if not 0 <= ionice_level <= 7:
+        raise ValueError("IONICE_LEVEL must be between 0 and 7")
+
+    hash_cmd = [
+        "nice", "-n", str(nice_value),
+        "ionice", "-c", str(ionice_class),
+    ]
+
+    # ionice idle class (3) has no priority level.
+    if ionice_class in (1, 2):
+        hash_cmd += ["-n", str(ionice_level)]
+
+    hash_cmd += [
+        "b3sum", "--num-threads=1", "--no-mmap",
+    ]
+
+    # Open the file once and keep that exact inode for hashing and xattr
+    # updates. O_NOFOLLOW prevents a final-component symlink swap.
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+
+    fd = os.open(str(path), flags)
+    try:
+        st_before = os.fstat(fd)
+        if not stat.S_ISREG(st_before.st_mode):
+            raise ValueError("Finding path is not a regular file")
+
+        content_sig_before = (
+            st_before.st_dev,
+            st_before.st_ino,
+            st_before.st_size,
+            st_before.st_mtime_ns,
+        )
+
+        proc = subprocess.run(
+            hash_cmd + [f"/proc/self/fd/{fd}"],
+            pass_fds=(fd,),
+            capture_output=True,
+            text=True,
+            timeout=None,
+        )
+        if proc.returncode != 0:
+            raise RuntimeError(proc.stderr.strip() or "b3sum failed")
+
+        current_hash = proc.stdout.split()[0].strip()
+        if not re.fullmatch(r"[0-9a-fA-F]{64}", current_hash):
+            raise RuntimeError("Invalid BLAKE3 result")
+
+        st_after_hash = os.fstat(fd)
+        content_sig_after_hash = (
+            st_after_hash.st_dev,
+            st_after_hash.st_ino,
+            st_after_hash.st_size,
+            st_after_hash.st_mtime_ns,
+        )
+        if content_sig_before != content_sig_after_hash:
+            raise RuntimeError("File changed while Accept was hashing it")
+
+        scandate = str(int(time.time())).encode("ascii")
+        mtime = str(int(st_after_hash.st_mtime)).encode("ascii")
+        size = str(st_after_hash.st_size).encode("ascii")
+        new_values = {
+            "user.blake3": current_hash.encode("ascii"),
+            "user.scandate": scandate,
+            "user.filedate": mtime,
+            "user.filesize": size,
+        }
+
+        # Snapshot the complete old reference set so a failed Accept can be
+        # rolled back instead of leaving a half-updated baseline.
+        old_values = {}
+        for attr in new_values:
+            try:
+                old_values[attr] = os.getxattr(fd, attr)
+            except OSError as exc:
+                # ENODATA is 61 on Linux; use getattr for portability.
+                if exc.errno == getattr(errno, "ENODATA", 61):
+                    old_values[attr] = None
+                else:
+                    raise
+
+        def rollback_xattrs():
+            rollback_errors = []
+            for attr, old_value in old_values.items():
+                try:
+                    if old_value is None:
+                        try:
+                            os.removexattr(fd, attr)
+                        except OSError as exc:
+                            if exc.errno != getattr(errno, "ENODATA", 61):
+                                raise
+                    else:
+                        os.setxattr(fd, attr, old_value)
+                except Exception as exc:
+                    rollback_errors.append(f"{attr}: {exc}")
+            return rollback_errors
+
+        try:
+            # Metadata first, reference hash last. The rollback snapshot above
+            # protects against partial writes.
+            for attr in ("user.scandate", "user.filedate", "user.filesize"):
+                os.setxattr(fd, attr, new_values[attr])
+
+            # Ensure file data did not change between hashing and committing.
+            st_before_commit = os.fstat(fd)
+            commit_sig = (
+                st_before_commit.st_dev,
+                st_before_commit.st_ino,
+                st_before_commit.st_size,
+                st_before_commit.st_mtime_ns,
+            )
+            if commit_sig != content_sig_after_hash:
+                raise RuntimeError("File changed before Accept could commit")
+
+            os.setxattr(fd, "user.blake3", new_values["user.blake3"])
+
+            # xattr writes change ctime, so only compare inode/data properties.
+            st_after_commit = os.fstat(fd)
+            final_sig = (
+                st_after_commit.st_dev,
+                st_after_commit.st_ino,
+                st_after_commit.st_size,
+                st_after_commit.st_mtime_ns,
+            )
+            if final_sig != content_sig_after_hash:
+                raise RuntimeError("File changed while Accept was committing")
+
+        except Exception as exc:
+            rollback_errors = rollback_xattrs()
+            if rollback_errors:
+                raise RuntimeError(
+                    f"{exc}; xattr rollback incomplete: "
+                    + "; ".join(rollback_errors)
+                ) from exc
+            raise
+
+    finally:
+        os.close(fd)
+
+    # Remove only the exact finding that the user accepted, and only after
+    # hashing + complete xattr commit succeeded.
+    data = get_integrity_findings(tool, job)
+    before_count = len(data.get("findings", []))
+    data["findings"] = [
+        item for item in data.get("findings", [])
+        if item.get("path") != finding_path
+    ]
+    if len(data["findings"]) == before_count:
+        raise RuntimeError("Accepted file was not present in findings queue")
+
+    data["updated"] = timestamp()
+
+    findings_path = integrity_findings_path(tool, job)
+    findings_path.parent.mkdir(parents=True, exist_ok=True)
+    temp = findings_path.with_name(findings_path.name + ".tmp")
+
+    with open(temp, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+        f.write("\n")
+        f.flush()
+        os.fsync(f.fileno())
+
+    os.replace(temp, findings_path)
+
+    return {
+        "path": finding_path,
+        "hash": current_hash,
+        "accepted": True,
+    }
+
+
+def accept_integrity_finding(tool, job, path_value):
+    # Prevent two simultaneous Accept requests from racing the queue.
+    with integrity_accept_lock:
+        return _accept_integrity_finding_locked(
+            tool,
+            job,
+            path_value
+        )
+
+
 # ------------------------------------------------------------
 # Tool / Job discovery
 # ------------------------------------------------------------
 
-def get_script(tool, job):
+def get_dynamic_jobs(tool):
+    """Return configured dynamic jobs for a tool.
+
+    v1.12 supports stable collection-backed jobs:
+
+      "dynamic_jobs": {
+        "collection": "jobs",
+        "script": "scan.sh"
+      }
+
+    Legacy count/prefix mode remains supported for older test/tools.
+    """
+    tool = safe_name(tool)
+    tool_dir = get_tool_dir(tool)
+    metadata = get_raw_metadata(tool)
+    spec = metadata.get("dynamic_jobs")
+
+    if spec is None:
+        return {}
+    if not isinstance(spec, dict):
+        raise ValueError("dynamic_jobs must be an object")
+
+    script_name = spec.get("script")
+    if not isinstance(script_name, str) or not script_name.endswith(".sh"):
+        raise ValueError("dynamic_jobs.script must name a .sh file")
+
+    script = (tool_dir / script_name).resolve()
+    try:
+        script.relative_to(tool_dir)
+    except ValueError:
+        raise ValueError("Dynamic job script outside allowed tool directory")
+    if not script.is_file():
+        raise FileNotFoundError(f"Dynamic job script not found: {script_name}")
+    if not os.access(script, os.X_OK):
+        raise PermissionError(f"{tool}/{script_name} is not executable")
+
+    collection = spec.get("collection")
+    if collection is not None:
+        if collection != "jobs":
+            raise ValueError("Only dynamic_jobs.collection='jobs' is supported")
+
+        result = {}
+        for index, item in enumerate(load_collections(tool)["jobs"], 1):
+            job_id = safe_name(str(item["id"]))
+            result[job_id] = {
+                "script": script,
+                "args": [job_id],
+                "name": item["name"],
+                "targets": list(item["targets"]),
+                "index": index,
+            }
+        return result
+
+    # Legacy v1.11 count-based dynamic jobs.
+    count_key = spec.get("count")
+    prefix = spec.get("prefix", "JOB")
+    name_field = spec.get("name_field", "NAME")
+
+    if not isinstance(count_key, str) or not count_key:
+        raise ValueError("dynamic_jobs.count must be a configuration key")
+    if not isinstance(prefix, str) or not prefix or not all(c.isalnum() or c == "_" for c in prefix):
+        raise ValueError("dynamic_jobs.prefix is invalid")
+    if not isinstance(name_field, str) or not name_field or not all(c.isalnum() or c == "_" for c in name_field):
+        raise ValueError("dynamic_jobs.name_field is invalid")
+
+    config = parse_config(tool)
+    try:
+        count = int(config.get(count_key, 0))
+    except (TypeError, ValueError):
+        raise ValueError(f"{count_key}: value must be an integer")
+    if count < 0 or count > 100:
+        raise ValueError(f"{count_key}: dynamic job count out of range")
+
+    result = {}
+    config_prefix = prefix.upper()
+    for index in range(1, count + 1):
+        job_id = f"job_{index}"
+        name_key = f"{config_prefix}_{index}_{name_field.upper()}"
+        display_name = str(config.get(name_key, "")).strip() or f"Job {index}"
+        result[job_id] = {
+            "script": script,
+            "args": [job_id],
+            "name": display_name,
+            "index": index,
+        }
+    return result
+
+def get_job_definition(tool, job):
+    """Resolve a job to executable + argv without changing legacy behaviour."""
     tool = safe_name(tool)
     job = safe_name(job)
+    tool_dir = get_tool_dir(tool)
 
-    tool_dir = (SCRIPT_ROOT / tool).resolve()
-
-    try:
-        tool_dir.relative_to(SCRIPT_ROOT)
-    except ValueError:
-        raise ValueError("Tool outside allowed root")
-
-    if not tool_dir.is_dir():
-        raise FileNotFoundError("Tool not found")
+    dynamic = get_dynamic_jobs(tool)
+    if job in dynamic:
+        return dynamic[job]
 
     script = (tool_dir / f"{job}.sh").resolve()
-
     try:
         script.relative_to(tool_dir)
     except ValueError:
         raise ValueError("Script outside allowed tool directory")
-
     if not script.is_file():
-        raise FileNotFoundError(
-            f"Job '{job}' not found for tool '{tool}'"
-        )
-
+        raise FileNotFoundError(f"Job '{job}' not found for tool '{tool}'")
     if not os.access(script, os.X_OK):
-        raise PermissionError(
-            f"{tool}/{job}.sh is not executable"
-        )
+        raise PermissionError(f"{tool}/{job}.sh is not executable")
 
-    return script
+    return {
+        "script": script,
+        "args": [],
+        "name": job,
+        "index": None,
+    }
+
+
+def get_script(tool, job):
+    # Compatibility helper used by log/status validation and existing callers.
+    return get_job_definition(tool, job)["script"]
 
 
 def get_tools():
@@ -220,28 +680,40 @@ def get_tools():
         return result
 
     for tool_dir in sorted(SCRIPT_ROOT.iterdir()):
-
-        if not tool_dir.is_dir():
-            continue
-
-        # Symlink-Verzeichnisse ignorieren.
-        if tool_dir.is_symlink():
+        if not tool_dir.is_dir() or tool_dir.is_symlink():
             continue
 
         jobs = []
 
-        for script in sorted(tool_dir.glob("*.sh")):
+        # Legacy/static jobs remain unchanged. A script declared as the generic
+        # dynamic runner is infrastructure, not a separately schedulable job.
+        dynamic_runner = None
+        metadata_path = tool_dir / "tool.json"
+        if metadata_path.is_file():
+            try:
+                metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+                spec = metadata.get("dynamic_jobs") if isinstance(metadata, dict) else None
+                if isinstance(spec, dict):
+                    dynamic_runner = spec.get("script")
+            except Exception:
+                # Metadata/config errors are surfaced below by get_dynamic_jobs;
+                # do not silently turn a broken dynamic runner into a static job.
+                pass
 
+        for script in sorted(tool_dir.glob("*.sh")):
             if not script.is_file() or script.is_symlink():
                 continue
-
             try:
                 resolved = script.resolve()
                 resolved.relative_to(tool_dir.resolve())
             except ValueError:
                 continue
-
+            if dynamic_runner and script.name == dynamic_runner:
+                continue
             jobs.append(script.stem)
+
+        dynamic_jobs = get_dynamic_jobs(tool_dir.name)
+        jobs.extend(dynamic_jobs.keys())
 
         if jobs:
             result[tool_dir.name] = jobs
@@ -346,7 +818,9 @@ def stop_job(tool, job):
     return pid
 
 def run_job(tool, job):
-    script = get_script(tool, job)
+    definition = get_job_definition(tool, job)
+    script = definition["script"]
+    args = definition.get("args", [])
     key = job_key(tool, job)
 
     with running_lock:
@@ -386,7 +860,7 @@ def run_job(tool, job):
         logfile_handle.flush()
 
         process = subprocess.Popen(
-            [str(script)],
+            [str(script), *args],
             cwd=str(script.parent),
             stdout=logfile_handle,
             stderr=subprocess.STDOUT,
@@ -504,7 +978,7 @@ def get_tool_dir(tool):
     return tool_dir
 
 
-def get_metadata(tool):
+def get_raw_metadata(tool):
     tool_dir = get_tool_dir(tool)
 
     path = tool_dir / "tool.json"
@@ -525,6 +999,44 @@ def get_metadata(tool):
     return metadata
 
 
+
+def get_metadata(tool):
+    """
+    Return effective tool metadata.
+
+    Static jobs from tool.json are preserved.  Configured dynamic jobs are
+    synthesized into metadata.jobs so existing WebUI pages (dashboard,
+    settings/schedules and logs) can consume them without special handling.
+    """
+    metadata = get_raw_metadata(tool)
+    result = dict(metadata)
+
+    jobs = result.get("jobs", {})
+    if jobs is None:
+        jobs = {}
+    if not isinstance(jobs, dict):
+        raise ValueError("jobs must be an object")
+
+    jobs = dict(jobs)
+
+    dynamic = get_dynamic_jobs(tool)
+    for job_id, definition in dynamic.items():
+        if job_id in jobs:
+            raise ValueError(
+                f"Dynamic job '{job_id}' conflicts with a static job"
+            )
+
+        jobs[job_id] = {
+            "name": definition.get("name") or job_id,
+            "description": definition.get("description")
+                or "Dynamic job",
+            "targets": definition.get("targets", [])
+        }
+
+    result["jobs"] = jobs
+    return result
+
+
 def get_config_schema(tool, values=None):
     """
     Build the complete configuration schema.
@@ -534,7 +1046,7 @@ def get_config_schema(tool, values=None):
     stored in config.conf so reading and writing use exactly the same
     schema logic.
     """
-    metadata = get_metadata(tool)
+    metadata = get_raw_metadata(tool)
 
     schema = {}
 
@@ -798,7 +1310,9 @@ def validate_config_value(key, value, field):
             )
 
         # config.conf is sourced by root shell scripts.
-        # Do not allow shell metacharacters.
+        # Values are written inside double quotes. Semicolon is therefore
+        # safe as data and is required for lists such as EXCLUDES.
+        # Reject characters that can escape/expand the quoted assignment.
         forbidden = [
             "\n",
             "\r",
@@ -807,7 +1321,6 @@ def validate_config_value(key, value, field):
             "\\",
             '"',
             "'",
-            ";",
             "|",
             "&",
             "<",
@@ -959,7 +1472,7 @@ def save_config(tool, values):
         )
 
         # Preserve schema ordering from tool.json.
-        metadata = get_metadata(tool)
+        metadata = get_raw_metadata(tool)
 
         for section in metadata.get(
             "config", {}
@@ -1647,6 +2160,49 @@ def handle_request(request):
             "metadata": metadata
         }
 
+
+    if action == "get_collections":
+        tool = request.get("tool")
+        collections = load_collections(tool)
+        return {
+            "success": True,
+            "tool": tool,
+            "collections": collections
+        }
+
+    if action == "set_collections":
+        tool = request.get("tool")
+        values = request.get("collections")
+        collections = save_collections(tool, values)
+        console(f"COLLECTIONS SET {tool}")
+        return {
+            "success": True,
+            "tool": tool,
+            "collections": collections
+        }
+
+    if action == "get_findings":
+        tool = request.get("tool")
+        job = request.get("job")
+        return {
+            "success": True,
+            "tool": tool,
+            "job": job,
+            "data": get_integrity_findings(tool, job)
+        }
+
+    if action == "accept_finding":
+        tool = request.get("tool")
+        job = request.get("job")
+        path = request.get("path")
+        result = accept_integrity_finding(tool, job, path)
+        console(f"INTEGRITY ACCEPT {tool}/{job} {result['path']}")
+        return {
+            "success": True,
+            "tool": tool,
+            "job": job,
+            "result": result
+        }
 
     if action == "get_info":
         tool = request.get("tool")
