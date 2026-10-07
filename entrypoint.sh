@@ -3,7 +3,7 @@ set -e
 
 MOS_ROOT="/mos-tools"
 AGENT_SOURCE="/opt/mos-tools/agent"
-AGENT_TARGET="${MOS_ROOT}/agent"
+AGENT_TARGET="/host-agent"
 
 echo "[MOS-TOOLS] Initializing persistent directories..."
 
