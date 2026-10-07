@@ -30,14 +30,73 @@ if [ ! -f /data/scheduler-state.json ]; then
 fi
 
 # ------------------------------------------------------------
-# Host agent bootstrap
+# Host agent bootstrap / update
 #
-# Only install files that do not already exist.
-# Never overwrite an existing host agent automatically.
+# Keep the persistent host agent in sync with the Docker image.
+# agent.py VERSION is used to detect a changed image agent.
+# Existing files are backed up before replacement.
 # ------------------------------------------------------------
 
 if [ -d "$AGENT_SOURCE" ]; then
 
+    SOURCE_AGENT="${AGENT_SOURCE}/agent.py"
+    TARGET_AGENT="${AGENT_TARGET}/agent.py"
+
+    source_version=""
+    target_version=""
+
+    if [ -f "$SOURCE_AGENT" ]; then
+        source_version="$(
+            sed -n 's/^VERSION = ["'\'']\([^"'\'']*\)["'\'']/\1/p' \
+                "$SOURCE_AGENT" | head -n 1
+        )"
+    fi
+
+    if [ -f "$TARGET_AGENT" ]; then
+        target_version="$(
+            sed -n 's/^VERSION = ["'\'']\([^"'\'']*\)["'\'']/\1/p' \
+                "$TARGET_AGENT" | head -n 1
+        )"
+    fi
+
+    if [ ! -f "$TARGET_AGENT" ]; then
+
+        echo "[MOS-TOOLS] Installing host agent..."
+        cp -a "$AGENT_SOURCE"/. "$AGENT_TARGET"/
+
+    elif [ -n "$source_version" ] &&
+         [ "$source_version" != "$target_version" ]; then
+
+        echo "[MOS-TOOLS] Updating host agent: ${target_version:-unknown} -> ${source_version}"
+
+        BACKUP_DIR="${MOS_ROOT}/backups/agent-${target_version:-unknown}"
+
+        # Do not overwrite an earlier backup of the same version.
+        if [ -e "$BACKUP_DIR" ]; then
+            BACKUP_DIR="${BACKUP_DIR}-$(date +%Y%m%d-%H%M%S)"
+        fi
+
+        mkdir -p "$BACKUP_DIR"
+
+        cp -a "$AGENT_TARGET"/. "$BACKUP_DIR"/
+        cp -a "$AGENT_SOURCE"/. "$AGENT_TARGET"/
+
+        echo "[MOS-TOOLS] Previous agent saved to: $BACKUP_DIR"
+
+    elif [ -z "$source_version" ]; then
+
+        echo "[MOS-TOOLS] WARNING: Unable to determine image agent version."
+        echo "[MOS-TOOLS] Existing host agent left unchanged."
+
+    else
+
+        echo "[MOS-TOOLS] Host agent already current: ${source_version}"
+
+    fi
+
+    # Install additional agent files introduced by newer images.
+    # This also covers installations where agent.py itself was
+    # intentionally left untouched because its version was unreadable.
     for source in "$AGENT_SOURCE"/*; do
 
         [ -e "$source" ] || continue
@@ -46,7 +105,7 @@ if [ -d "$AGENT_SOURCE" ]; then
         target="${AGENT_TARGET}/${name}"
 
         if [ ! -e "$target" ]; then
-            echo "[MOS-TOOLS] Installing agent file: ${name}"
+            echo "[MOS-TOOLS] Installing new agent file: ${name}"
             cp -a "$source" "$target"
         fi
 
