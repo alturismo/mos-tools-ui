@@ -9,7 +9,7 @@ import re
 app = Flask(__name__)
 
 
-WEBUI_VERSION = "0.13"
+WEBUI_VERSION = "0.15.1"
 
 SOCKET_PATH = "/run/mos-tools/agent.sock"
 SCHEDULE_FILE = "/data/schedules.json"
@@ -910,7 +910,8 @@ def get_dashboard():
                 "id": tool_name,
                 "name": display_name(tool_name),
                 "jobs": [],
-                "has_settings": False
+                "has_settings": False,
+                "builder_managed": False
             }
 
             metadata = {}
@@ -927,6 +928,8 @@ def get_dashboard():
                         "metadata",
                         {}
                     )
+
+                    tool_data["builder_managed"] = metadata.get("builder") == {"version": 1}
 
                     tool_data["name"] = (
                         metadata.get("name")
@@ -1614,6 +1617,92 @@ def save_tool_schedule(tool):
             "error": str(exc)
         }), 503
 
+
+# MOS Tool Builder (builder-managed tools only)
+@app.route("/builder")
+@app.route("/builder/<tool>")
+def builder_page(tool=None):
+    if tool is not None and not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", tool):
+        return "Invalid tool id", 400
+    return render_template("builder.html", tool=tool, webui_version=WEBUI_VERSION)
+
+
+@app.route("/api/builder/<tool>", methods=["GET"])
+def builder_load(tool):
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", tool):
+        return jsonify(success=False, error="Invalid tool id"), 400
+    try:
+        result = agent_request({"action": "builder_get", "tool": tool}, timeout=10)
+        return jsonify(result), 200 if result.get("success") else 400
+    except Exception as exc:
+        return jsonify(success=False, error=str(exc)), 503
+
+
+@app.route("/api/builder", methods=["POST"])
+@app.route("/api/builder/<tool>", methods=["PUT"])
+def builder_save(tool=None):
+    if request.content_length is not None and request.content_length > 800000:
+        return jsonify(success=False, error="Payload too large"), 413
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify(success=False, error="Invalid JSON payload"), 400
+    if tool is not None and data.get("id") != tool:
+        return jsonify(success=False, error="Tool ID cannot be changed"), 400
+    if len(request.get_data()) > 800000:
+        return jsonify(success=False, error="Payload too large"), 413
+    try:
+        action = "builder_update" if tool is not None else "builder_create"
+        result = agent_request({"action": action, "data": data}, timeout=30)
+        return jsonify(result), 200 if result.get("success") else 400
+    except Exception as exc:
+        return jsonify(success=False, error=str(exc)), 503
+
+
+
+@app.route("/api/builder/backup-tools", methods=["GET"])
+def builder_backup_tools_api():
+    try:
+        result = agent_request({"action": "builder_backup_tools"}, timeout=30)
+        return jsonify(result), 200 if result.get("success") else 400
+    except Exception as exc:
+        return jsonify(success=False, error=str(exc)), 503
+
+
+@app.route("/api/builder/<tool>/backups", methods=["GET"])
+def builder_backup_list(tool):
+    if not re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", tool):
+        return jsonify(success=False, error="Invalid tool id"), 400
+    try:
+        result = agent_request({"action": "builder_backups", "tool": tool}, timeout=20)
+        return jsonify(result), 200 if result.get("success") else 400
+    except Exception as exc:
+        return jsonify(success=False, error=str(exc)), 503
+
+
+@app.route("/api/builder/<tool>/restore", methods=["POST"])
+def builder_restore_api(tool):
+    if not re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", tool):
+        return jsonify(success=False, error="Invalid tool id"), 400
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict) or not isinstance(data.get("backup"), str):
+        return jsonify(success=False, error="Invalid backup selection"), 400
+    try:
+        result = agent_request({"action": "builder_restore", "tool": tool,
+                                "backup": data["backup"]}, timeout=30)
+        return jsonify(result), 200 if result.get("success") else 400
+    except Exception as exc:
+        return jsonify(success=False, error=str(exc)), 503
+
+
+@app.route("/api/builder/<tool>", methods=["DELETE"])
+def builder_delete_api(tool):
+    if not re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", tool):
+        return jsonify(success=False, error="Invalid tool id"), 400
+    try:
+        result = agent_request({"action": "builder_delete", "tool": tool}, timeout=30)
+        return jsonify(result), 200 if result.get("success") else 400
+    except Exception as exc:
+        return jsonify(success=False, error=str(exc)), 503
 
 if __name__ == "__main__":
     app.run(
