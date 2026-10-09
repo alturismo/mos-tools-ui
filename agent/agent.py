@@ -17,7 +17,7 @@ import importlib.util
 import signal
 
 
-VERSION = "1.13.3"
+VERSION = "1.13.7"
 
 SOCKET_PATH = "/run/mos-tools/agent.sock"
 RESTART_HELPER = Path("/mnt/cache/appdata/mos-tools/agent/restart-agent.sh").resolve()
@@ -818,12 +818,14 @@ def stop_job(tool, job):
     return pid
 
 def run_job(tool, job):
-    definition = get_job_definition(tool, job)
-    script = definition["script"]
-    args = definition.get("args", [])
     key = job_key(tool, job)
 
     with running_lock:
+        # Resolve under the lock so builder_update cannot replace the tool
+        # between script lookup and process creation.
+        definition = get_job_definition(tool, job)
+        script = definition["script"]
+        args = definition.get("args", [])
 
         existing = running.get(key)
 
@@ -2089,6 +2091,27 @@ def handle_request(request):
             "tools": tools
         }
 
+    if action == "builder_create":
+        return {"success": True, "result": builder_create(request.get("data"))}
+
+    if action == "builder_get":
+        return {"success": True, "result": builder_get(request.get("tool"))}
+
+    if action == "builder_update":
+        return {"success": True, "result": builder_update(request.get("data"))}
+
+    if action == "builder_backup_tools":
+        return {"success": True, "result": builder_backup_tools()}
+
+    if action == "builder_backups":
+        return {"success": True, "result": builder_backups(request.get("tool"))}
+
+    if action == "builder_restore":
+        return {"success": True, "result": builder_restore(request.get("tool"), request.get("backup"))}
+
+    if action == "builder_delete":
+        return {"success": True, "result": builder_delete(request.get("tool"))}
+
     if action == "get_log":
         tool = request.get("tool")
         job = request.get("job")
@@ -2275,6 +2298,448 @@ def handle_request(request):
     }
 
 
+
+# ------------------------------------------------------------
+# Tool Builder v0.1 (new tools only)
+# ------------------------------------------------------------
+
+builder_lock = threading.Lock()
+BUILDER_ID_RE = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
+BUILDER_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
+
+
+def builder_validate(payload):
+    if not isinstance(payload, dict):
+        raise ValueError("Builder payload must be an object")
+    tool = payload.get("id")
+    if not isinstance(tool, str) or not BUILDER_ID_RE.fullmatch(tool):
+        raise ValueError("Invalid tool id")
+    name = payload.get("name")
+    if not isinstance(name, str) or not 1 <= len(name.strip()) <= 128 or "\n" in name or "\r" in name:
+        raise ValueError("Invalid tool name")
+    description = payload.get("description", "")
+    if not isinstance(description, str) or len(description) > 500:
+        raise ValueError("Invalid description")
+    fields = payload.get("fields", [])
+    scripts = payload.get("scripts", [])
+    dependencies = payload.get("dependencies", [])
+    if not isinstance(fields, list) or len(fields) > 100:
+        raise ValueError("Invalid fields")
+    if not isinstance(scripts, list) or not 1 <= len(scripts) <= 20:
+        raise ValueError("1 to 20 scripts required")
+    if not isinstance(dependencies, list) or len(dependencies) > 50:
+        raise ValueError("Invalid dependencies")
+
+    clean_fields, values, keys = [], {}, set()
+    for item in fields:
+        if not isinstance(item, dict):
+            raise ValueError("Invalid field")
+        key = item.get("key")
+        kind = item.get("type", "text")
+        label = item.get("label")
+        if not isinstance(key, str) or not BUILDER_KEY_RE.fullmatch(key) or key in keys:
+            raise ValueError("Invalid or duplicate field key")
+        if not isinstance(label, str) or not 1 <= len(label.strip()) <= 128:
+            raise ValueError("Invalid field label")
+        if kind not in ("text", "integer", "boolean", "choice"):
+            raise ValueError("Unsupported field type")
+        field = {"key": key, "label": label.strip(), "type": kind}
+        default = item.get("default", False if kind == "boolean" else 0 if kind == "integer" else "")
+        if kind == "choice":
+            choices = item.get("choices")
+            if not isinstance(choices, list) or not 1 <= len(choices) <= 30:
+                raise ValueError("Choice field needs choices")
+            field["choices"] = choices
+        if kind == "integer":
+            for bound in ("min", "max"):
+                if bound in item:
+                    if type(item[bound]) is not int:
+                        raise ValueError("Invalid integer bound")
+                    field[bound] = item[bound]
+        default = validate_config_value(key, default, {**field, "default": default})
+        # config.conf is shell-sourced: reject unsafe default values,
+        # including choice values, before writing any files.
+        rendered = str(default).lower() if isinstance(default, bool) else str(default)
+        if re.search(r"[^A-Za-z0-9 _./:+,-]", rendered):
+            raise ValueError(f"{key}: unsafe default value")
+        field["default"] = default
+        clean_fields.append(field)
+        values[key] = default
+        keys.add(key)
+
+    clean_scripts, jobs, job_ids = {}, {}, set()
+    for item in scripts:
+        if not isinstance(item, dict):
+            raise ValueError("Invalid script")
+        job = item.get("id")
+        code = item.get("content")
+        label = item.get("name", job)
+        if not isinstance(job, str) or not BUILDER_ID_RE.fullmatch(job) or job in job_ids:
+            raise ValueError("Invalid or duplicate script id")
+        if not isinstance(code, str) or not code.startswith("#!/bin/sh\n") and not code.startswith("#!/bin/bash\n"):
+            raise ValueError("Script must start with a sh/bash shebang")
+        if not 1 <= len(code.encode("utf-8")) <= 32768 or "\x00" in code:
+            raise ValueError("Invalid script size/content")
+        if not isinstance(label, str) or not 1 <= len(label.strip()) <= 128:
+            raise ValueError("Invalid job name")
+        shell = "/bin/bash" if code.startswith("#!/bin/bash\n") else "/bin/sh"
+        checked = subprocess.run([shell, "-n"], input=code, text=True, capture_output=True, timeout=5)
+        if checked.returncode:
+            raise ValueError(f"{job}: {checked.stderr.strip()[:300]}")
+        clean_scripts[job + ".sh"] = code
+        jobs[job] = {"name": label.strip()}
+        job_ids.add(job)
+
+    clean_dependencies = []
+    for item in dependencies:
+        if not isinstance(item, dict):
+            raise ValueError("Invalid dependency")
+        command = item.get("command")
+        package = item.get("package", "__system__")
+        if not isinstance(command, str) or not re.fullmatch(r"[A-Za-z0-9_.+-]{1,80}", command):
+            raise ValueError("Invalid dependency command")
+        if not isinstance(package, str) or (package != "__system__" and not PACKAGE_NAME_RE.fullmatch(package)):
+            raise ValueError("Invalid dependency package")
+        clean_dependencies.append({"command": command, "package": package})
+
+    metadata = {"id": tool, "name": name.strip(), "description": description,
+                "version": "1.0", "builder": {"version": 1}, "jobs": jobs,
+                "config": {"general": {"title": "General", "fields": clean_fields}} if clean_fields else {},
+                "dependencies": clean_dependencies}
+    config = "# Generated by MOS Tool Builder\n" + "".join(
+        f'{key}="{str(value).lower() if isinstance(value, bool) else value}"\n'
+        for key, value in values.items()
+    )
+    return tool, metadata, config, clean_scripts
+
+
+def builder_create(payload):
+    tool, metadata, config, scripts = builder_validate(payload)
+    SCRIPT_ROOT.mkdir(parents=True, exist_ok=True)
+    destination = SCRIPT_ROOT / tool
+    with builder_lock:
+        if destination.exists() or destination.is_symlink():
+            raise FileExistsError("Tool already exists")
+        # Private staging directory, renamed into place only when complete.
+        import tempfile
+        stage = Path(tempfile.mkdtemp(prefix=".builder-", dir=str(SCRIPT_ROOT)))
+        try:
+            (stage / "tool.json").write_text(json.dumps(metadata, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+            (stage / "config.conf").write_text(config, encoding="utf-8")
+            for filename, content in scripts.items():
+                path = stage / filename
+                path.write_text(content, encoding="utf-8")
+                path.chmod(0o750)
+            stage.rename(destination)
+        finally:
+            if stage.exists():
+                shutil.rmtree(stage)
+    console(f"BUILDER CREATE {tool}")
+    return {"id": tool, "jobs": list(metadata["jobs"])}
+
+
+def builder_update(payload):
+    """Replace only builder v1 tools, preserving valid saved configuration."""
+    import tempfile
+
+    tool, metadata, _defaults, scripts = builder_validate(payload)
+    destination = SCRIPT_ROOT / tool
+    backup_root = BASE_ROOT / "backups" / "builder"
+
+    with builder_lock:
+        # Lock out job launches until the new directory is fully installed.
+        with running_lock:
+            if destination.is_symlink() or not destination.is_dir():
+                raise FileNotFoundError("Tool not found or unsafe")
+            current = get_raw_metadata(tool)
+            if current.get("id") != tool or current.get("builder") != {"version": 1}:
+                raise ValueError("Only builder v1 tools can be updated")
+            for key, entry in running.items():
+                if key.startswith(tool + ":") and entry["process"].poll() is None:
+                    raise RuntimeError("Cannot update tool while a job is running")
+
+            # Read only literal assignments, never source config.conf.
+            previous = {}
+            config_path = destination / "config.conf"
+            if config_path.is_symlink():
+                raise ValueError("Unsafe config.conf")
+            if config_path.exists():
+                for line in config_path.read_text(encoding="utf-8").splitlines():
+                    if not line or line.lstrip().startswith("#") or "=" not in line:
+                        continue
+                    key, value = line.split("=", 1)
+                    key = key.strip()
+                    value = value.strip()
+                    if value.startswith('"') and value.endswith('"'):
+                        value = value[1:-1]
+                    previous[key] = value
+
+            fields = metadata.get("config", {}).get("general", {}).get("fields", [])
+            merged = {}
+            for field in fields:
+                key = field["key"]
+                value = field["default"]
+                if key in previous:
+                    try:
+                        candidate = validate_config_value(key, previous[key], field)
+                        rendered = str(candidate).lower() if isinstance(candidate, bool) else str(candidate)
+                        if not re.search(r"[^A-Za-z0-9 _./:+,-]", rendered):
+                            value = candidate
+                    except (ValueError, TypeError):
+                        pass  # Incompatible old value -> new default.
+                merged[key] = value
+
+            config = "# Generated by MOS Tool Builder\n" + "".join(
+                f'{key}="{str(value).lower() if isinstance(value, bool) else value}"\n'
+                for key, value in merged.items()
+            )
+
+            # The backup is a persistent copy; the old directory is retained
+            # temporarily for immediate rollback on failed installation.
+            backup_root.mkdir(parents=True, exist_ok=True)
+            stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+            backup = backup_root / f"{tool}-{stamp}"
+            stage = Path(tempfile.mkdtemp(prefix=".builder-stage-", dir=str(SCRIPT_ROOT)))
+            retired = None
+            try:
+                stage.chmod(0o755)
+                (stage / "tool.json").write_text(
+                    json.dumps(metadata, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+                (stage / "config.conf").write_text(config, encoding="utf-8")
+                for filename, content in scripts.items():
+                    path = stage / filename
+                    path.write_text(content, encoding="utf-8")
+                    path.chmod(0o750)
+                # Reject additional unexpected files instead of silently losing them.
+                allowed = {"tool.json", "config.conf", *scripts.keys(),
+                           *(job + ".sh" for job in current.get("jobs", {}))}
+                if any(entry.name not in allowed for entry in destination.iterdir()):
+                    raise ValueError("Tool contains unmanaged files; update refused")
+                shutil.copytree(destination, backup, symlinks=True)
+                retired = Path(tempfile.mkdtemp(prefix=".builder-old-", dir=str(SCRIPT_ROOT)))
+                retired.rmdir()
+                destination.rename(retired)
+                try:
+                    stage.rename(destination)
+                except Exception:
+                    retired.rename(destination)
+                    retired = None
+                    raise
+                shutil.rmtree(retired)
+                retired = None
+            finally:
+                if stage.exists():
+                    shutil.rmtree(stage)
+                # Keep retired directory if cleanup failed, to avoid data loss.
+
+    console(f"BUILDER UPDATE {tool}")
+    return {"id": tool, "jobs": list(metadata["jobs"]),
+            "backup": str(backup), "values": merged}
+
+
+def builder_get(tool):
+    directory = get_tool_dir(tool)
+    metadata = get_raw_metadata(tool)
+    if not isinstance(metadata.get("builder"), dict):
+        raise ValueError("Existing tool is not builder-managed")
+    scripts = []
+    for job, definition in metadata.get("jobs", {}).items():
+        safe_name(job)
+        path = directory / (job + ".sh")
+        if path.is_symlink() or not path.is_file():
+            raise ValueError("Missing or unsafe script")
+        scripts.append({"id": job, "name": definition.get("name", job),
+                        "content": path.read_text(encoding="utf-8")})
+    fields = metadata.get("config", {}).get("general", {}).get("fields", [])
+    return {"id": tool, "name": metadata.get("name", tool),
+            "description": metadata.get("description", ""),
+            "fields": fields, "scripts": scripts,
+            "dependencies": metadata.get("dependencies", []),
+            "values": parse_config(tool)}
+
+# ------------------------------------------------------------
+# Builder backup management (v0.15)
+# ------------------------------------------------------------
+
+def _builder_backup_root():
+    return BASE_ROOT / "backups" / "builder"
+
+
+def _builder_check_running(tool):
+    with running_lock:
+        for key, entry in running.items():
+            if key.startswith(tool + ":") and entry["process"].poll() is None:
+                raise RuntimeError("Cannot change tool while a job is running")
+
+
+def _builder_check_managed(directory, tool):
+    if directory.is_symlink() or not directory.is_dir():
+        raise FileNotFoundError("Builder tool not found")
+    meta_path = directory / "tool.json"
+    if meta_path.is_symlink() or not meta_path.is_file():
+        raise ValueError("Unsafe tool metadata")
+    metadata = json.loads(meta_path.read_text(encoding="utf-8"))
+    if metadata.get("id") != tool or metadata.get("builder") != {"version": 1}:
+        raise ValueError("Only builder v1 tools can be managed")
+    return metadata
+
+
+def _builder_check_contents(directory, metadata):
+    jobs = metadata.get("jobs", {})
+    if not isinstance(jobs, dict) or not jobs:
+        raise ValueError("Invalid backup jobs")
+    allowed = {"tool.json", "config.conf"}
+    for job in jobs:
+        if not BUILDER_ID_RE.fullmatch(job):
+            raise ValueError("Invalid job in backup")
+        allowed.add(job + ".sh")
+    actual = {item.name for item in directory.iterdir()}
+    if actual != allowed:
+        raise ValueError("Unexpected or missing files in builder tool")
+    for item in directory.iterdir():
+        if item.is_symlink() or not item.is_file():
+            raise ValueError("Unsafe file in builder tool")
+    for job in jobs:
+        code = (directory / (job + ".sh")).read_text(encoding="utf-8")
+        if not (code.startswith("#!/bin/sh\n") or code.startswith("#!/bin/bash\n")):
+            raise ValueError("Invalid script header")
+        shell = "/bin/bash" if code.startswith("#!/bin/bash\n") else "/bin/sh"
+        check = subprocess.run([shell, "-n"], input=code, text=True,
+                               capture_output=True, timeout=5)
+        if check.returncode:
+            raise ValueError(f"{job}: invalid script syntax")
+    return True
+
+
+def _builder_new_backup(tool):
+    root = _builder_backup_root()
+    root.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+    return root / f"{tool}-{stamp}"
+
+
+def builder_backup_tools():
+    """List distinct tool IDs with at least one valid Builder backup."""
+    root = _builder_backup_root()
+    with builder_lock:
+        if not root.is_dir():
+            return []
+        tools = set()
+        for path in root.iterdir():
+            if path.is_symlink() or not path.is_dir():
+                continue
+            try:
+                metadata_path = path / "tool.json"
+                if metadata_path.is_symlink() or not metadata_path.is_file():
+                    continue
+                metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+                tool = metadata.get("id")
+                if not isinstance(tool, str) or not BUILDER_ID_RE.fullmatch(tool):
+                    continue
+                if not path.name.startswith(tool + "-"):
+                    continue
+                _builder_check_managed(path, tool)
+                _builder_check_contents(path, metadata)
+                tools.add(tool)
+            except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
+                continue
+        return sorted(tools)
+
+
+def builder_backups(tool):
+    tool = safe_name(tool)
+    root = _builder_backup_root()
+    with builder_lock:
+        result = []
+        if not root.is_dir():
+            return result
+        for path in sorted(root.iterdir(), key=lambda x: x.name, reverse=True):
+            if path.is_symlink() or not path.is_dir() or not path.name.startswith(tool + "-"):
+                continue
+            try:
+                metadata = _builder_check_managed(path, tool)
+                _builder_check_contents(path, metadata)
+                result.append({"id": path.name, "jobs": list(metadata["jobs"]),
+                               "description": metadata.get("description", "")})
+            except (OSError, ValueError, KeyError, TypeError):
+                continue
+        return result[:100]
+
+
+def builder_delete(tool):
+    tool = safe_name(tool)
+    destination = SCRIPT_ROOT / tool
+    with builder_lock:
+        _builder_check_running(tool)
+        metadata = _builder_check_managed(destination, tool)
+        _builder_check_contents(destination, metadata)
+        backup = _builder_new_backup(tool)
+        shutil.copytree(destination, backup, symlinks=False)
+        _builder_check_contents(backup, _builder_check_managed(backup, tool))
+        # Rename first: tool disappears atomically. A failed cleanup retains
+        # the retired directory rather than deleting the only working copy.
+        import tempfile
+        retired = Path(tempfile.mkdtemp(prefix=".builder-deleted-", dir=str(SCRIPT_ROOT)))
+        retired.rmdir()
+        destination.rename(retired)
+        try:
+            shutil.rmtree(retired)
+        except Exception:
+            if not destination.exists():
+                retired.rename(destination)
+            raise
+    console(f"BUILDER DELETE {tool} backup={backup.name}")
+    return {"id": tool, "backup": backup.name}
+
+
+def builder_restore(tool, backup_id):
+    import tempfile
+    tool = safe_name(tool)
+    if not isinstance(backup_id, str) or not re.fullmatch(
+            re.escape(tool) + r"-\d{8}-\d{6}-\d{6}", backup_id):
+        raise ValueError("Invalid backup id")
+    backup = _builder_backup_root() / backup_id
+    destination = SCRIPT_ROOT / tool
+    with builder_lock:
+        _builder_check_running(tool)
+        source_meta = _builder_check_managed(backup, tool)
+        _builder_check_contents(backup, source_meta)
+        if destination.exists() or destination.is_symlink():
+            current_meta = _builder_check_managed(destination, tool)
+            _builder_check_contents(destination, current_meta)
+        else:
+            current_meta = None
+        stage = Path(tempfile.mkdtemp(prefix=".builder-restore-", dir=str(SCRIPT_ROOT)))
+        retired = None
+        safety = None
+        try:
+            stage.chmod(0o755)
+            for item in backup.iterdir():
+                shutil.copy2(item, stage / item.name)
+            _builder_check_contents(stage, _builder_check_managed(stage, tool))
+            if current_meta is not None:
+                safety = _builder_new_backup(tool)
+                shutil.copytree(destination, safety, symlinks=False)
+                _builder_check_contents(safety, _builder_check_managed(safety, tool))
+                retired = Path(tempfile.mkdtemp(prefix=".builder-old-", dir=str(SCRIPT_ROOT)))
+                retired.rmdir()
+                destination.rename(retired)
+            try:
+                stage.rename(destination)
+            except Exception:
+                if retired is not None:
+                    retired.rename(destination)
+                    retired = None
+                raise
+            if retired is not None:
+                shutil.rmtree(retired)
+        finally:
+            if stage.exists():
+                shutil.rmtree(stage)
+    console(f"BUILDER RESTORE {tool} from={backup_id}")
+    return {"id": tool, "backup": backup_id,
+            "safety_backup": safety.name if safety else None}
+
 # ------------------------------------------------------------
 # Socket server
 # ------------------------------------------------------------
@@ -2315,14 +2780,36 @@ def main():
 
             with connection:
                 try:
-                    raw = connection.recv(65536)
-
+                    # JSON is sent without a terminator. Read until a full
+                    # UTF-8 JSON document is available; cap total size.
+                    connection.settimeout(15)
+                    raw = bytearray()
+                    request = None
+                    while True:
+                        chunk = connection.recv(65536)
+                        if not chunk:
+                            break
+                        raw.extend(chunk)
+                        if len(raw) > 900000:
+                            raise ValueError("Request too large")
+                        try:
+                            request = json.loads(raw.decode("utf-8"))
+                            break
+                        except (json.JSONDecodeError, UnicodeDecodeError):
+                            continue
+                    else:
+                        raise ValueError("Incomplete request")
                     if not raw:
                         continue
+                    if request is None:
+                        raise ValueError("Incomplete JSON request")
 
-                    request = json.loads(
-                        raw.decode("utf-8")
-                    )
+                    if request.get("action") in ("builder_create", "builder_get", "builder_update", "builder_backups", "builder_backup_tools", "builder_restore", "builder_delete"):
+                        import struct
+                        peer = connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)
+                        _pid, uid, _gid = struct.unpack("3i", peer)
+                        if uid != 0:
+                            raise PermissionError("Builder requires root socket peer")
 
                     result = handle_request(request)
 
