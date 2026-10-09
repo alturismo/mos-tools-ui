@@ -24,6 +24,7 @@
 
         <nav class="sidebar-nav">
             <a class="sidebar-link active" href="#top"><span class="sidebar-icon">●</span><span class="sidebar-label">Dashboard</span></a>
+            <a class="sidebar-link" href="/builder"><span class="sidebar-icon">＋</span><span class="sidebar-label">Tool Builder</span></a>
             {% if dashboard.agent_online %}
                 <div class="sidebar-heading sidebar-label">TOOLS</div>
                 {% for tool in dashboard.tools %}
@@ -134,6 +135,7 @@
                         </div>
 
 						<div class="tool-actions">
+                            {% if tool.builder_managed %}<a class="settings-link" href="/builder/{{ tool.id }}">✎ Edit</a>{% endif %}
 
 							<span class="job-count">
 								{{ tool.jobs|length }}

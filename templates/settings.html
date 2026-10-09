@@ -81,6 +81,7 @@
         </div>
         <nav class="sidebar-nav">
             <a class="sidebar-link" href="/"><span class="sidebar-icon">●</span><span class="sidebar-label">Dashboard</span></a>
+            <a class="sidebar-link" href="/builder"><span class="sidebar-icon">＋</span><span class="sidebar-label">Tool Builder</span></a>
             {% if dashboard and dashboard.agent_online %}
                 <div class="sidebar-heading sidebar-label">TOOLS</div>
                 {% for nav_tool in dashboard.tools %}
@@ -129,6 +130,9 @@
                 <span class="tool-page-link active">
                     ⚙ Settings
                 </span>
+                {% if metadata.builder is defined and metadata.builder.version == 1 %}
+                <a class="tool-page-link" href="/builder/{{ tool }}">✎ Edit tool</a>
+                {% endif %}
             </div>
 
         </div>
